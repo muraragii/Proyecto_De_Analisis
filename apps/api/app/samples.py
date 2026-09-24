@@ -43,21 +43,28 @@ def restaurante(n: int = 800, seed: int = 1) -> pd.DataFrame:
     })
 
 
-def restaurante_pos(n_tickets: int = 400, seed: int = 3) -> pd.DataFrame:
+def restaurante_pos(n_tickets: int = 900, seed: int = 3) -> pd.DataFrame:
     """Exportación "real" de un punto de venta: una fila por platillo (varias por ticket),
     precio unitario + cantidad, fechas dd/mm/aaaa como texto, un valor mal capturado y la
-    fila TOTAL que agregan los Excel. Sirve para ver las advertencias de calidad."""
+    fila TOTAL que agregan los Excel. Incluye patrones reales para los hallazgos: fines de
+    semana más fuertes, el Día de las Madres (10 de mayo) y una mesera que vende más por
+    ticket."""
     rng = np.random.default_rng(seed)
     menu = {"Tacos al pastor": 25, "Quesadilla": 45, "Pozole": 120, "Enchiladas": 110,
             "Agua de horchata": 35, "Refresco": 30, "Cerveza": 55, "Flan": 50}
     start = pd.Timestamp("2025-04-02")  # miércoles: la primera semana queda incompleta
+    days = pd.date_range(start, periods=60, freq="D")
+    weekday_weight = {4: 1.6, 5: 1.9, 6: 1.3}  # viernes, sábado, domingo
+    weights = np.array([weekday_weight.get(d.dayofweek, 1.0) for d in days])
+    weights[days == pd.Timestamp("2025-05-10")] *= 3.5
     rows = []
     for t in range(1, n_tickets + 1):
-        day = start + pd.Timedelta(days=int(rng.integers(0, 60)))
+        day = days[rng.choice(len(days), p=weights / weights.sum())]
         hour = int(rng.choice([13, 14, 15, 19, 20, 21], p=[0.15, 0.25, 0.15, 0.1, 0.2, 0.15]))
         when = day + pd.Timedelta(hours=hour, minutes=int(rng.integers(0, 60)))
         mesero = rng.choice(["Ana", "Luis", "Carla", "Jorge"])
-        for item in rng.choice(list(menu), int(rng.integers(1, 5)), replace=False):
+        n_items = int(rng.integers(2, 6) if mesero == "Ana" else rng.integers(1, 5))
+        for item in rng.choice(list(menu), n_items, replace=False):
             qty = int(rng.integers(1, 4))
             rows.append({
                 "No. Ticket": t,

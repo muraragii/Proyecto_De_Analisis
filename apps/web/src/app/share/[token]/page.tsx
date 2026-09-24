@@ -3,6 +3,7 @@
 import { useParams } from "next/navigation";
 import { useEffect, useState } from "react";
 import { ChartGrid } from "@/components/ChartGrid";
+import { Insights } from "@/components/Insights";
 import { api, type Dashboard } from "@/lib/api";
 
 export default function SharedDashboardPage() {
@@ -20,6 +21,7 @@ export default function SharedDashboardPage() {
   return (
     <div className="space-y-6">
       <h1 className="text-2xl font-semibold">{dashboard.title}</h1>
+      <Insights insights={dashboard.insights ?? []} />
       <ChartGrid charts={dashboard.charts ?? []} />
     </div>
   );

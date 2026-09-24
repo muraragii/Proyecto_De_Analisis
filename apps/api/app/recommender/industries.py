@@ -56,6 +56,9 @@ class Industry:
     description: str
     roles: tuple[Role, ...]
     templates: tuple[Template, ...] = field(default_factory=tuple)
+    # Vocabulario para los textos de hallazgos: cómo se llama cada transacción y el dinero.
+    unit: tuple[str, str] = ("registro", "registros")
+    revenue_noun: str = "ventas"
 
 
 def _role(id, keywords, types, **kw) -> Role:
@@ -72,6 +75,7 @@ ECOMMERCE = Industry(
     id="ecommerce",
     name="E-commerce",
     description="Tiendas en línea: ventas, productos, canales y clientes.",
+    unit=("pedido", "pedidos"),
     roles=(
         _role("date", ["fecha", "date", "created", "timestamp", "dia"], DATE),
         _role("order", _ORDER, IDENT),
@@ -79,11 +83,13 @@ ECOMMERCE = Industry(
         _role("quantity", ["cantidad", "qty", "quantity", "unidades", "units", "piezas"], NUM,
               additive_only=True),
         _role("category", ["categoria", "category", "departamento", "familia", "linea"], CAT),
-        _role("product", ["producto", "product", "articulo", "item", "sku"], CAT),
+        _role("product", ["producto", "product", "articulo", "item", "descripcion",
+                          "description", "sku"], CAT),
         _role("channel", ["canal", "channel", "origen", "source", "medio", "marketplace",
                           "plataforma"], CAT),
         _role("status", ["estado", "estatus", "status"], CAT),
-        _role("customer", ["cliente", "customer", "comprador", "usuario"], CAT),
+        # El cliente suele venir como ID ("Customer ID"): es clave, pero sirve para agrupar.
+        _role("customer", ["cliente", "customer", "comprador", "usuario"], CAT | IDENT),
     ),
     templates=(
         Template("Ventas en el tiempo", ChartType.LINE, Aggregation.SUM, 0.98,
@@ -121,6 +127,7 @@ RESTAURANTE = Industry(
     id="restaurante",
     name="Restaurante",
     description="Restaurantes y cafeterías: ticket promedio, horarios pico y platillos.",
+    unit=("ticket", "tickets"),
     roles=(
         _role("date", ["fecha", "date", "dia", "timestamp", "apertura"], DATE),
         _role("time", ["hora", "horario", "time", "fecha", "date", "timestamp"], DATE,
@@ -175,6 +182,8 @@ CLINICA = Industry(
     id="clinica",
     name="Clínica / consultorio",
     description="Servicios de salud: citas, médicos, especialidades y asistencia.",
+    unit=("cita", "citas"),
+    revenue_noun="ingresos",
     roles=(
         _role("date", ["fecha", "cita", "date", "appointment", "consulta", "dia"], DATE),
         _role("time", ["hora", "horario", "time", "fecha", "cita", "date"], DATE,
@@ -269,15 +278,21 @@ def industry_specs(profile: DatasetProfile, industry: Industry) -> list[ChartSpe
         transform = t.x_transform
         if transform == AUTO:
             transform = time_granularity(profile.column(x))
+        y = roles.get(t.y) if t.y else None
+        group_by = roles.get("order") if t.per_order else None
+        if (group_by and y is None and t.chart_type == ChartType.KPI
+                and t.aggregation == Aggregation.COUNT):
+            # Contar pedidos con importe = contar solo ventas (total > 0), no devoluciones.
+            y = roles.get("revenue")
         specs.append(
             ChartSpec(
                 chart_type=t.chart_type,
                 title=t.title,
                 x=x,
-                y=roles.get(t.y) if t.y else None,
+                y=y,
                 aggregation=t.aggregation,
                 x_transform=transform,
-                group_by=roles.get("order") if t.per_order else None,
+                group_by=group_by,
                 per_day=t.per_day,
                 limit=t.limit,
                 score=t.score,

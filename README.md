@@ -44,6 +44,19 @@ npm run dev
 
 Abrir http://localhost:3000 y subir cualquier archivo de `samples/`.
 
+**Probar con datos reales o grandes** (sin la web):
+
+```powershell
+cd apps\api
+.venv\Scripts\python scripts\analizar_archivo.py ruta\al\archivo.xlsx
+```
+
+Probado con [Online Retail II](https://archive.ics.uci.edu/dataset/502/online+retail+ii)
+(UCI, 1.07 M de filas, 2 hojas): subir y analizar ~22 s una vez; abrir el dataset ~2 s
+gracias a la caché Parquet. Cifras verificadas contra un cálculo independiente con pandas
+(40,078 pedidos, ticket promedio 523.30). Guarda estos archivos en `data-externa/`
+(ignorada por Git).
+
 **Tests:**
 
 ```powershell
@@ -82,6 +95,23 @@ Verificadas con tests de referencia (`tests/test_golden.py`, respuestas calculad
 | Orden día/mes deducido de los datos (25/04 ⇒ día/mes) | Confundir 3 de abril con 4 de marzo |
 | Avisos: valores ilegibles, duplicados, atípicos, negativos, vacíos | Errores silenciosos |
 
+### Hallazgos en texto (`app/insights.py`)
+
+Frases como *"Los sábados son tu día más fuerte: 1.9 veces el promedio del resto"*. Regla:
+es mejor no decir nada que afirmar algo falso, así que cada hallazgo pasa una prueba:
+
+| Hallazgo | Prueba |
+|---|---|
+| Mejor día de la semana, diferencia por mesero/canal/sucursal, hora pico | Permutación (α = 1%; contempla comparaciones múltiples) |
+| Cambio reciente | Intervalo de predicción t al 99%, solo periodos completos |
+| Tendencia | Pendiente significativa al 99%, ≥ 8 periodos completos |
+| Día atípico | z robusto (mediana/MAD) en escala log; se excluye del patrón semanal |
+| Concentración | Descriptivo (hecho de los datos) |
+
+`tests/test_insights.py` verifica que detecte efectos sembrados con la cifra correcta y que,
+con 30 negocios de datos aleatorios, no invente patrones (medido: 2 de 100 con algún
+falso positivo).
+
 Industrias incluidas: **e-commerce**, **restaurante** y **clínica**. Para añadir otra,
 basta con definir un `Industry` en `industries.py` y agregar un dataset de ejemplo en
 `app/samples.py` con su test.
@@ -116,5 +146,8 @@ basta con definir un `Industry` en `industries.py` y agregar un dataset de ejemp
 - **Migraciones con Alembic** en lugar de `create_all` al arrancar.
 - **Postgres** en lugar de SQLite (solo cambia `APP_DATABASE_URL`) y **S3** para
   archivos (implementar `Storage` en `ingestion/storage.py`).
-- **Caché de DataFrames**: hoy se relee el archivo en cada petición.
 - Encriptación de archivos en reposo.
+- Moneda configurable por organización (hoy se muestra el símbolo solo si el archivo lo
+  trae, p. ej. "$1,200").
+- Distinguir cargos que no son productos (envío, comisiones, ajustes) en los rankings.
+- Límite de subida de 50 MB: archivos mayores requieren carga por partes o conexión directa.

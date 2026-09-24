@@ -7,10 +7,11 @@ from sqlalchemy import select
 from app.config import settings
 from app.deps import SessionDep, StorageDep, TenantDep
 from app.ingestion.parsers import SUPPORTED_EXTENSIONS, UnsupportedFileError, file_extension, read_table
+from app.insights import generate_insights
 from app.models import Dataset
 from app.profiling import DatasetProfile, profile_dataframe
 from app.recommender import detect_industry, recommend
-from app.services import get_dataset, load_dataframe, render_charts
+from app.services import get_dataset, load_dataframe, render_charts, save_cache
 
 router = APIRouter(prefix="/datasets", tags=["datasets"])
 
@@ -61,13 +62,15 @@ async def upload_dataset(
     if df.empty:
         raise HTTPException(422, "El archivo no contiene datos.")
 
-    profile, _ = profile_dataframe(df)
+    profile, coerced = profile_dataframe(df)
     industry, _ = detect_industry(profile)
+    storage_key = storage.save(tenant.id, filename, content)
+    save_cache(storage, storage_key, coerced)
     dataset = Dataset(
         tenant_id=tenant.id,
         name=filename.rsplit(".", 1)[0],
         filename=filename,
-        storage_key=storage.save(tenant.id, filename, content),
+        storage_key=storage_key,
         n_rows=profile.n_rows,
         n_cols=profile.n_cols,
         profile=profile.model_dump(mode="json"),
@@ -113,4 +116,5 @@ def dataset_recommendations(
         "detected_industry": rec.detected_industry,
         "detection_confidence": rec.detection_confidence,
         "charts": render_charts(df, rec.charts),
+        "insights": [i.model_dump() for i in generate_insights(profile, df, rec.industry)],
     }

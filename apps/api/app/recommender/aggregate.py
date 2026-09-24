@@ -55,6 +55,17 @@ def chart_data(df: pd.DataFrame, spec: ChartSpec) -> dict[str, Any]:
 
 def _kpi(df: pd.DataFrame, spec: ChartSpec) -> tuple[Any, list[str]]:
     g = spec.group_by
+    if g and spec.y and spec.aggregation in (Aggregation.COUNT, Aggregation.MEAN):
+        # Por transacción, solo cuentan las ventas: las devoluciones/cancelaciones (total
+        # negativo) y los movimientos en cero no son pedidos ni entran al ticket promedio.
+        per_group = df.groupby(g)[spec.y].sum(min_count=1).dropna()
+        sales = per_group[per_group > 0]
+        excluded = len(per_group) - len(sales)
+        notes = [f"Sin contar {excluded:,} '{g}' con total negativo o en cero "
+                 "(devoluciones, cancelaciones o ajustes)."] if excluded else []
+        if spec.aggregation == Aggregation.COUNT:
+            return len(sales), notes
+        return sales.mean(), [f"Promedio del total de cada '{g}' ({len(sales):,})."] + notes
     if spec.aggregation == Aggregation.COUNT or spec.y is None:
         if g:
             n = df[g].nunique()
@@ -64,9 +75,6 @@ def _kpi(df: pd.DataFrame, spec: ChartSpec) -> tuple[Any, list[str]]:
     values = df[spec.y]
     if spec.aggregation == Aggregation.SUM:
         return values.sum(), []
-    if g:
-        per_group = df.groupby(g)[spec.y].sum(min_count=1)
-        return per_group.mean(), [f"Promedio del total de cada '{g}' ({per_group.notna().sum():,})."]
     return values.mean(), []
 
 
@@ -202,6 +210,8 @@ def _group_keys(series: pd.Series, transform: XTransform | None) -> pd.Series:
                 return series.dt.normalize()
     if pd.api.types.is_bool_dtype(series):
         return series.map({True: "Sí", False: "No"})
+    if pd.api.types.is_float_dtype(series) and (series.dropna() % 1 == 0).all():
+        series = series.astype("Int64")  # códigos/IDs leídos como float: 12346.0 -> 12346
     return series.astype("string")
 
 

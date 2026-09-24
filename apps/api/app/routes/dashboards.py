@@ -7,6 +7,7 @@ from sqlalchemy import select
 from app.deps import SessionDep, StorageDep, TenantDep
 from app.models import Dashboard, new_share_token
 from app.profiling import DatasetProfile
+from app.insights import generate_insights
 from app.recommender import INDUSTRIES, ChartSpec
 from app.services import get_dashboard, get_dataset, load_dataframe, render_charts
 
@@ -34,13 +35,17 @@ class DashboardOut(BaseModel):
     created_at: datetime
     updated_at: datetime
     charts: list[dict] | None = None  # [{spec, data, error}] al leer un dashboard concreto
+    insights: list[dict] | None = None  # hallazgos en texto, al leer un dashboard concreto
 
 
-def _out(d: Dashboard, charts: list[dict] | None = None) -> DashboardOut:
+def _out(
+    d: Dashboard, charts: list[dict] | None = None, insights: list[dict] | None = None
+) -> DashboardOut:
     return DashboardOut(
         id=d.id, dataset_id=d.dataset_id, title=d.title, industry=d.industry,
         share_token=d.share_token, created_at=d.created_at, updated_at=d.updated_at,
         charts=charts,
+        insights=insights,
     )
 
 
@@ -52,10 +57,14 @@ def _validate_columns(profile: DatasetProfile, charts: list[ChartSpec]) -> None:
                 raise HTTPException(422, f"La columna '{col}' no existe en el dataset")
 
 
-def _rendered(storage, session, dashboard: Dashboard) -> list[dict]:
+def _rendered(storage, session, dashboard: Dashboard) -> tuple[list[dict], list[dict]]:
+    """Gráficos con sus datos y hallazgos en texto, calculados sobre los datos actuales."""
     dataset = get_dataset(session, dashboard.tenant_id, dashboard.dataset_id)
     specs = [ChartSpec.model_validate(c) for c in dashboard.charts]
-    return render_charts(load_dataframe(storage, dataset), specs)
+    df = load_dataframe(storage, dataset)
+    profile = DatasetProfile.model_validate(dataset.profile)
+    insights = generate_insights(profile, df, dashboard.industry)
+    return render_charts(df, specs), [i.model_dump() for i in insights]
 
 
 @router.post("/dashboards", response_model=DashboardOut, status_code=201)
@@ -91,7 +100,7 @@ def read_dashboard(
     dashboard_id: str, tenant: TenantDep, session: SessionDep, storage: StorageDep
 ):
     dashboard = get_dashboard(session, tenant.id, dashboard_id)
-    return _out(dashboard, _rendered(storage, session, dashboard))
+    return _out(dashboard, *_rendered(storage, session, dashboard))
 
 
 @router.patch("/dashboards/{dashboard_id}", response_model=DashboardOut)
@@ -138,6 +147,6 @@ def public_dashboard(token: str, session: SessionDep, storage: StorageDep):
     dashboard = session.scalar(select(Dashboard).where(Dashboard.share_token == token))
     if dashboard is None:
         raise HTTPException(404, "Enlace inválido o revocado")
-    out = _out(dashboard, _rendered(storage, session, dashboard))
+    out = _out(dashboard, *_rendered(storage, session, dashboard))
     out.share_token = None  # no reexponer el token
     return out

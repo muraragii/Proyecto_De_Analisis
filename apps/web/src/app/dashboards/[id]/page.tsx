@@ -3,6 +3,7 @@
 import { useParams, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { ChartGrid } from "@/components/ChartGrid";
+import { Insights } from "@/components/Insights";
 import { api, type Dashboard } from "@/lib/api";
 
 export default function DashboardPage() {
@@ -62,6 +63,7 @@ export default function DashboardPage() {
           </button>
         </div>
       )}
+      <Insights insights={dashboard.insights ?? []} />
       <ChartGrid charts={dashboard.charts ?? []} />
     </div>
   );

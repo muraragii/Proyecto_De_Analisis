@@ -24,13 +24,38 @@ def read_table(content: bytes, filename: str) -> pd.DataFrame:
     if ext not in SUPPORTED_EXTENSIONS:
         raise UnsupportedFileError(f"Formato no soportado: '{ext}'. Usa CSV o Excel.")
 
+    sheet_info: dict = {}
     if ext in {".xlsx", ".xls"}:
-        # Primera hoja; la selección de hoja llega en una fase posterior.
-        df = pd.read_excel(io.BytesIO(content), sheet_name=0)
+        sheets = pd.read_excel(io.BytesIO(content), sheet_name=None, engine=_excel_engine())
+        df, sheet_info = _combine_sheets(sheets)
     else:
         df = _read_csv(content)
 
-    return _clean(df)
+    df = _clean(df)
+    df.attrs.update(sheet_info)
+    return df
+
+
+def _excel_engine() -> str | None:
+    try:
+        import python_calamine  # noqa: F401  (varias veces más rápido que openpyxl)
+        return "calamine"
+    except ImportError:
+        return None
+
+
+def _combine_sheets(sheets: dict[str, pd.DataFrame]) -> tuple[pd.DataFrame, dict]:
+    """Excel con varias hojas: si todas tienen las mismas columnas (p. ej. una hoja por
+    año) se combinan; si no, se usa la primera y se avisa cuáles quedaron fuera."""
+    filled = {name: df for name, df in sheets.items() if not df.dropna(how="all").empty}
+    if len(filled) <= 1:
+        return next(iter(filled.values()), next(iter(sheets.values()))), {}
+    names = list(filled)
+    columns = [[str(c).strip().lower() for c in df.columns] for df in filled.values()]
+    if all(c == columns[0] for c in columns):
+        frames = [df.set_axis(filled[names[0]].columns, axis=1) for df in filled.values()]
+        return pd.concat(frames, ignore_index=True), {"sheets_combined": names}
+    return filled[names[0]], {"sheets_used": names[0], "sheets_ignored": names[1:]}
 
 
 def _read_csv(content: bytes) -> pd.DataFrame:

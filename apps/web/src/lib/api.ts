@@ -75,11 +75,22 @@ export interface RenderedChart {
   error: string | null;
 }
 
+/** Hallazgo en texto. basis: sobre qué datos y con qué prueba se calculó. */
+export interface Insight {
+  kind: string;
+  title: string;
+  text: string;
+  tone: "positive" | "negative" | "neutral";
+  basis: string;
+  score: number;
+}
+
 export interface Recommendations {
   industry: string | null;
   detected_industry: string | null;
   detection_confidence: number;
   charts: RenderedChart[];
+  insights: Insight[];
 }
 
 export interface Industry {
@@ -97,6 +108,7 @@ export interface Dashboard {
   created_at: string;
   updated_at: string;
   charts: RenderedChart[] | null;
+  insights: Insight[] | null;
 }
 
 export interface Organization {

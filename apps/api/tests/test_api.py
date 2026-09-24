@@ -51,6 +51,7 @@ def test_dashboard_save_and_share(make_client):
 
     ds = upload(ana, samples.restaurante()).json()
     rec = ana.get(f"/datasets/{ds['id']}/recommendations").json()
+    assert any(i["kind"] == "peak_hours" for i in rec["insights"])
     specs = [c["spec"] for c in rec["charts"][:4]]
 
     created = ana.post(
@@ -69,6 +70,8 @@ def test_dashboard_save_and_share(make_client):
     assert public.status_code == 200
     body = public.json()
     assert body["title"] == "Mi restaurante" and len(body["charts"]) == 4
+    # el restaurante de ejemplo tiene horarios concentrados a propósito
+    assert "peak_hours" in {i["kind"] for i in body["insights"]}
     assert body["share_token"] is None
 
     ana.delete(f"/dashboards/{dash_id}/share")

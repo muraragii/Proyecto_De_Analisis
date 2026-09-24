@@ -9,6 +9,8 @@ numpy>=2.3
 openpyxl>=3.1.5
 argon2-cffi>=25.1
 email-validator>=2.3
+pyarrow>=21  # caché Parquet de cada dataset
+python-calamine>=0.4  # lector de Excel rápido
 
 # dev
 pytest>=8.3

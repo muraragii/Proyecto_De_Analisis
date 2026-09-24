@@ -130,6 +130,41 @@ def test_pos_export_end_to_end():
     assert by_title["Tickets"]["value"] == raw["No. Ticket"].nunique()
 
 
+class TestReturns:
+    """Factura de venta + cancelación con prefijo "C" (formato de muchos sistemas)."""
+
+    CSV = """Invoice,InvoiceDate,Description,Quantity,Price
+1001,2025-01-06 10:00,Taza,2,50
+1001,2025-01-06 10:00,Plato,1,100
+1002,2025-01-06 11:00,Taza,4,50
+1003,2025-01-07 12:00,Vaso,1,300
+C1003,2025-01-07 15:00,Vaso,-1,300
+1004,2025-01-08 09:00,Taza,0,0
+""" + "\n".join(f"{2000 + i},2025-01-{9 + i % 20:02d} 10:00,Plato,1,100" for i in range(40))
+
+    def test_cancellation_codes_are_kept(self):
+        profile, df = load(self.CSV)
+        assert profile.column("Invoice").semantic_type == SemanticType.IDENTIFIER
+        assert "C1003" in set(df["Invoice"].astype(str))  # no se convierte en vacío
+
+    def test_line_total_is_derived(self):
+        profile, df = load(self.CSV)
+        derived = profile.column("Importe (calculado)")
+        assert derived.additive and derived.stats["derived_from"] == ["Quantity", "Price"]
+        assert "derived_total" in warning_codes(profile)
+        # 200 + 200 + 300 - 300 + 0 + 40 x 100 = 4,400 (neto)
+        assert chart(profile, df, "Ventas totales")[1]["value"] == 4400
+
+    def test_average_ticket_counts_only_sales(self):
+        profile, df = load(self.CSV)
+        # ventas: 1001=200, 1002=200, 1003=300 y 40 de 100 -> 4,700 / 43 = 109.30
+        _, avg = chart(profile, df, "Ticket promedio")
+        assert avg["value"] == pytest.approx(4700 / 43, abs=0.01)
+        assert any("Sin contar 2" in n for n in avg["notes"])  # C1003 y 1004 (en cero)
+        _, orders = chart(profile, df, "Pedidos")
+        assert orders["value"] == 43
+
+
 class TestMessyValues:
     def test_currency_na_and_percent(self):
         csv = "id,fecha,monto,descuento\n" + "\n".join(
@@ -238,6 +273,36 @@ def test_pie_rejects_negative_totals():
                      aggregation=Aggregation.SUM)
     with pytest.raises(ValueError):
         chart_data(df, spec)
+
+
+def test_excel_sheets_with_same_columns_are_combined():
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf) as writer:
+        pd.DataFrame({"fecha": ["2024-01-01"], "ventas": [10]}).to_excel(writer, sheet_name="2024", index=False)
+        pd.DataFrame({"fecha": ["2025-01-01"], "ventas": [20]}).to_excel(writer, sheet_name="2025", index=False)
+        pd.DataFrame({"otra": [1]}).to_excel(writer, sheet_name="Notas", index=False)
+    df = read_table(buf.getvalue(), "ventas.xlsx")
+    # La hoja "Notas" tiene otras columnas: no se mezcla y se avisa.
+    assert len(df) == 1 and df.attrs["sheets_ignored"] == ["2025", "Notas"]
+
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf) as writer:
+        pd.DataFrame({"fecha": ["2024-01-01"], "ventas": [10]}).to_excel(writer, sheet_name="2024", index=False)
+        pd.DataFrame({"fecha": ["2025-01-01"], "ventas": [20]}).to_excel(writer, sheet_name="2025", index=False)
+    df = read_table(buf.getvalue(), "ventas.xlsx")
+    assert df["ventas"].sum() == 30 and df.attrs["sheets_combined"] == ["2024", "2025"]
+    profile, _ = profile_dataframe(df)
+    assert "sheets_combined" in warning_codes(profile)
+
+
+def test_repeated_numeric_id_is_never_summed():
+    csv = "Customer ID,Quantity\n" + "\n".join(f"{12000 + i % 30},{i % 5 + 1}" for i in range(200))
+    profile, _ = load(csv)
+    # Con pocos valores es una categoría (sirve para agrupar); con muchos, un identificador.
+    # En ningún caso es una métrica que se sume.
+    assert profile.column("Customer ID").semantic_type in (SemanticType.CATEGORICAL,
+                                                            SemanticType.IDENTIFIER)
+    assert all(c.y != "Customer ID" for c in recommend(profile).charts if c.aggregation)
 
 
 def test_excel_totals_row():

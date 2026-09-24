@@ -13,7 +13,8 @@ from app.ingestion.parsers import file_extension
 
 class Storage(Protocol):
     def save(self, tenant_id: str, filename: str, content: bytes) -> str: ...
-    def read(self, key: str) -> bytes: ...
+    def put(self, key: str, content: bytes) -> None: ...
+    def read(self, key: str) -> bytes: ...  # FileNotFoundError si no existe
 
 
 class LocalStorage:
@@ -26,6 +27,11 @@ class LocalStorage:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(content)
         return key
+
+    def put(self, key: str, content: bytes) -> None:
+        path = self._path(key)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
 
     def read(self, key: str) -> bytes:
         return self._path(key).read_bytes()

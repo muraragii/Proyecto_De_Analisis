@@ -67,6 +67,9 @@ ADDITIVE_TOKENS = {
 PRICE_TOKENS = {"precio", "price", "unitario", "unit"}
 QUANTITY_TOKENS = {"cantidad", "qty", "quantity", "unidades", "units", "piezas"}
 LINE_TOTAL_TOKENS = {"total", "subtotal", "importe", "monto", "amount"}
+# Columnas que ya son el importe de la venta (si existe una, no se calcula cantidad x precio).
+MONEY_TOKENS = {"total", "subtotal", "importe", "monto", "amount", "venta", "ventas", "ingreso",
+                "ingresos", "revenue", "sales", "facturacion"}
 
 _DATE_LIKE = re.compile(r"\d.*[-/:.]|[a-zA-Z]{3,}.*\d|\d.*[a-zA-Z]{3,}")
 _DAY_MONTH = re.compile(r"^\s*(\d{1,2})[/\-.](\d{1,2})[/\-.]\d{2,4}")
@@ -98,6 +101,16 @@ def profile_dataframe(df: pd.DataFrame) -> tuple[DatasetProfile, pd.DataFrame]:
             column.additive = _is_additive(column, df[column.name], has_quantity)
             issues += _value_issues(column, coerced[column.name])
 
+    derived = _derive_line_total(columns, coerced)
+    if derived is not None:
+        columns.append(derived)
+        quantity, price = derived.stats["derived_from"]
+        issues.append(DataWarning(
+            level=WarningLevel.INFO, code="derived_total", column=derived.name,
+            message=f"No hay una columna con el importe de cada venta: se calculó "
+                    f"'{derived.name}' = '{quantity}' × '{price}'.",
+        ))
+
     profile = DatasetProfile(n_rows=len(df), n_cols=len(df.columns), columns=columns)
     profile.warnings = _dataset_issues(df, profile) + issues
     return profile, coerced
@@ -107,6 +120,10 @@ def coerce_dataframe(df: pd.DataFrame, profile: DatasetProfile) -> pd.DataFrame:
     """Reaplica las conversiones de un perfil guardado a un DataFrame recién leído."""
     coerced = df.copy()
     for col in profile.columns:
+        if derived_from := col.stats.get("derived_from"):
+            quantity, price = derived_from
+            coerced[col.name] = coerced[quantity] * coerced[price]
+            continue
         if col.name not in coerced.columns:
             continue
         if col.semantic_type == SemanticType.NUMERIC:
@@ -135,10 +152,19 @@ def _infer(series: pd.Series, name: str) -> tuple[SemanticType, pd.Series, dict]
     if not lowered.empty and lowered.isin(BOOLEAN_STRINGS).all() and lowered.nunique() == 2:
         return SemanticType.BOOLEAN, series, {}
 
-    numeric = _to_numeric(series)
-    if _parse_ratio(numeric, values) >= PARSE_THRESHOLD:
+    numeric = _to_numeric(series) if _looks_numeric(values) else None
+    ratio = _parse_ratio(numeric, values) if numeric is not None else 0.0
+    if ratio >= PARSE_THRESHOLD:
+        semantic_type = _classify_numeric(numeric.dropna(), tokens)
+        if semantic_type in (SemanticType.IDENTIFIER, SemanticType.CATEGORICAL) and ratio < 1:
+            # Códigos casi siempre numéricos ("489434") con excepciones ("C489449", una
+            # cancelación): convertirlos borraría justo las excepciones. Se quedan como texto.
+            return semantic_type, series, {}
         extra = {"percent": True} if as_text.str.endswith("%").mean() >= 0.5 else {}
-        return _classify_numeric(numeric.dropna(), tokens), numeric, extra
+        symbols = as_text.str.extract(r"([$€£])", expand=False).dropna()
+        if len(symbols) >= 0.5 * len(as_text):
+            extra["currency"] = symbols.mode().iloc[0]  # solo si el archivo la trae
+        return semantic_type, numeric, extra
 
     if as_text.str.contains(_DATE_LIKE).mean() >= PARSE_THRESHOLD:
         order = _date_order(as_text)
@@ -157,9 +183,11 @@ def _classify_numeric(values: pd.Series, tokens: set[str]) -> SemanticType:
     if values.nunique() == 2 and set(values.unique()) == {0, 1}:
         return SemanticType.BOOLEAN
     unique_ratio = values.nunique() / len(values) if len(values) else 0
-    if tokens & ID_TOKENS and unique_ratio > 0.9:
-        return SemanticType.IDENTIFIER
     is_integer = len(values) and np.all(np.mod(values, 1) == 0)
+    if tokens & ID_TOKENS and (is_integer or unique_ratio > 0.9):
+        # "Customer ID" se repite en muchas filas pero sigue siendo una clave: nunca se suma.
+        few = values.nunique() <= MAX_CATEGORIES
+        return SemanticType.CATEGORICAL if few and unique_ratio < 0.9 else SemanticType.IDENTIFIER
     if is_integer and _is_order_key(tokens):
         return SemanticType.IDENTIFIER
     if is_integer and tokens & CODE_TOKENS and values.nunique() <= MAX_CATEGORIES:
@@ -200,6 +228,31 @@ def _is_additive(column: ColumnProfile, original: pd.Series, has_quantity: bool)
     return True
 
 
+DERIVED_TOTAL_NAME = "Importe (calculado)"
+
+
+def _derive_line_total(columns: list[ColumnProfile], coerced: pd.DataFrame) -> ColumnProfile | None:
+    """Exportaciones con cantidad y precio unitario pero sin importe (muy común en tiendas
+    en línea): sin esta columna no habría ninguna cifra de ventas que se pueda sumar."""
+    numeric = [c for c in columns if c.semantic_type == SemanticType.NUMERIC]
+    if any(c.additive and set(name_tokens(c.name)) & MONEY_TOKENS for c in numeric):
+        return None
+    quantity = next((c for c in numeric if set(name_tokens(c.name)) & QUANTITY_TOKENS), None)
+    price = next((c for c in numeric if c.additive is False
+                  and set(name_tokens(c.name)) & PRICE_TOKENS), None)
+    if quantity is None or price is None or DERIVED_TOTAL_NAME in coerced.columns:
+        return None
+    coerced[DERIVED_TOTAL_NAME] = coerced[quantity.name] * coerced[price.name]
+    column = _describe(DERIVED_TOTAL_NAME, coerced[DERIVED_TOTAL_NAME],
+                       coerced[DERIVED_TOTAL_NAME], SemanticType.NUMERIC)
+    column.additive = True
+    column.source_dtype = "calculada"
+    column.stats["derived_from"] = [quantity.name, price.name]
+    if currency := price.stats.get("currency"):
+        column.stats["currency"] = currency
+    return column
+
+
 def _geo_role(name: str, semantic_type: SemanticType) -> GeoRole | None:
     tokens = set(name_tokens(name))
     for role, keywords in GEO_TOKENS.items():
@@ -222,21 +275,26 @@ def _parse_ratio(parsed: pd.Series, original_values: pd.Series) -> float:
 
 
 def _to_numeric(series: pd.Series) -> pd.Series:
+    """Texto a número entendiendo formatos latinos y anglosajones, vectorizado:
+    '1.234,56' -> 1234.56 · '1,234.56' -> 1234.56 · '12,5' -> 12.5 · '$1,200' -> 1200."""
     if pd.api.types.is_numeric_dtype(series):
         return series
     text = series.astype("string").str.replace(_CURRENCY_CHARS, "", regex=True)
-    return pd.to_numeric(text.map(_normalize_number, na_action="ignore"), errors="coerce")
+    comma_thousands = text.str.fullmatch(_THOUSANDS_COMMA).fillna(False)
+    dot_thousands = text.str.fullmatch(_THOUSANDS_DOT).fillna(False)
+    decimal_comma = (~comma_thousands & ~dot_thousands & (text.str.count(",") == 1)
+                     & ~text.str.contains(".", regex=False)).fillna(False)
+    text = text.mask(comma_thousands, text.str.replace(",", "", regex=False))
+    text = text.mask(dot_thousands,
+                     text.str.replace(".", "", regex=False).str.replace(",", ".", regex=False))
+    text = text.mask(decimal_comma, text.str.replace(",", ".", regex=False))
+    return pd.to_numeric(text, errors="coerce")
 
 
-def _normalize_number(text: str) -> str:
-    """'1.234,56' -> '1234.56', '1,234.56' -> '1234.56', '12,5' -> '12.5'."""
-    if _THOUSANDS_COMMA.match(text):
-        return text.replace(",", "")
-    if _THOUSANDS_DOT.match(text):
-        return text.replace(".", "").replace(",", ".")
-    if text.count(",") == 1 and "." not in text:
-        return text.replace(",", ".")
-    return text
+def _looks_numeric(values: pd.Series) -> bool:
+    """Filtro rápido con una muestra: evita convertir columnas enteras de texto libre."""
+    sample = values.sample(min(len(values), 5000), random_state=0)
+    return _parse_ratio(_to_numeric(sample), sample) >= PARSE_THRESHOLD - 0.05
 
 
 def _date_order(text: pd.Series) -> str | None:
@@ -400,6 +458,19 @@ def _dataset_issues(df: pd.DataFrame, profile: DatasetProfile) -> list:
             level=WarningLevel.INFO, code="summary_rows_removed",
             message=f"Se ignoró {rows} ({labels}) para no contar las cifras dos veces."
             if n == 1 else f"Se ignoraron {rows} ({labels}) para no contar las cifras dos veces.",
+        ))
+    if combined := df.attrs.get("sheets_combined"):
+        issues.append(DataWarning(
+            level=WarningLevel.INFO, code="sheets_combined",
+            message=f"Se combinaron las {len(combined)} hojas del Excel "
+                    f"({', '.join(repr(n) for n in combined)}) porque tienen las mismas columnas.",
+        ))
+    if ignored := df.attrs.get("sheets_ignored"):
+        issues.append(DataWarning(
+            level=WarningLevel.WARNING, code="sheets_ignored",
+            message=f"Se analizó solo la hoja '{df.attrs['sheets_used']}'. Las hojas "
+                    f"{', '.join(repr(n) for n in ignored)} tienen otras columnas; súbelas "
+                    "como archivos aparte.",
         ))
     duplicates = int(df.duplicated().sum())
     if duplicates:

@@ -3,6 +3,7 @@
 import { useParams, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { ChartGrid } from "@/components/ChartGrid";
+import { Insights } from "@/components/Insights";
 import {
   api,
   formatNumber,
@@ -190,6 +191,8 @@ export default function DatasetPage() {
           {saving ? "Guardando…" : `Guardar dashboard (${selected.size})`}
         </button>
       </section>
+
+      {rec && <Insights insights={rec.insights} />}
 
       {rec ? (
         <ChartGrid
