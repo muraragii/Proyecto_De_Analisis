@@ -1,0 +1,10 @@
+[project]
+name = "proyecto-analisis-api"
+version = "0.1.0"
+description = "API de perfilado de datos y recomendación de visualizaciones"
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+filterwarnings = ["ignore::DeprecationWarning"]

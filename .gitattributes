@@ -1,0 +1,4 @@
+# Saltos de línea normalizados a LF en el repositorio
+* text=auto eol=lf
+*.xlsx binary
+*.ico binary
