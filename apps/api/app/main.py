@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
 from app.db import Base, engine
 from app.recommender import INDUSTRIES
-from app.routes import dashboards, datasets
+from app.routes import auth, dashboards, datasets
 
 
 @asynccontextmanager
@@ -21,9 +21,11 @@ app = FastAPI(title="Proyecto Análisis API", version="0.1.0", lifespan=lifespan
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
+    allow_credentials=True,  # la cookie de sesión viaja en peticiones desde la web
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.include_router(auth.router)
 app.include_router(datasets.router)
 app.include_router(dashboards.router)
 

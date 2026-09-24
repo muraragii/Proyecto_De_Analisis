@@ -1,14 +1,16 @@
+from dataclasses import dataclass
 from functools import lru_cache
 from typing import Annotated
 
-from fastapi import Depends, Header, HTTPException
-from sqlalchemy.exc import IntegrityError
+from fastapi import Cookie, Depends, HTTPException
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.auth import find_session
 from app.config import settings
 from app.db import get_session
 from app.ingestion.storage import LocalStorage, Storage
-from app.models import Tenant
+from app.models import Membership, Tenant, User, UserSession
 
 SessionDep = Annotated[Session, Depends(get_session)]
 
@@ -21,23 +23,43 @@ def get_storage() -> Storage:
 StorageDep = Annotated[Storage, Depends(get_storage)]
 
 
-def current_tenant(
-    session: SessionDep, x_tenant_id: Annotated[str | None, Header()] = None
-) -> Tenant:
-    """PROVISIONAL hasta integrar autenticación: el tenant llega en la cabecera X-Tenant-ID
-    y se crea si no existe. Con auth real, el tenant saldrá del token del usuario."""
-    if not x_tenant_id or len(x_tenant_id) > 64 or not x_tenant_id.replace("-", "").isalnum():
-        raise HTTPException(401, "Falta o es inválida la cabecera X-Tenant-ID")
-    tenant = session.get(Tenant, x_tenant_id)
-    if tenant is None:
-        session.add(Tenant(id=x_tenant_id, name=x_tenant_id))
-        try:
-            session.commit()
-        except IntegrityError:
-            # Otra petición simultánea del mismo navegador lo creó primero.
-            session.rollback()
-        tenant = session.get(Tenant, x_tenant_id)
-    return tenant
+@dataclass
+class AuthContext:
+    user: User
+    tenant: Tenant
+    role: str
+    session: UserSession
+
+
+def current_auth(
+    db: SessionDep,
+    token: Annotated[str | None, Cookie(alias=settings.session_cookie)] = None,
+) -> AuthContext:
+    user_session = find_session(db, token)
+    if user_session is None:
+        raise HTTPException(401, "Inicia sesión para continuar")
+    membership = db.scalar(
+        select(Membership).where(
+            Membership.user_id == user_session.user_id,
+            Membership.tenant_id == user_session.tenant_id,
+        )
+    )
+    if membership is None:  # lo quitaron de la organización
+        raise HTTPException(401, "Ya no perteneces a esta organización")
+    return AuthContext(
+        user=db.get(User, user_session.user_id),
+        tenant=db.get(Tenant, user_session.tenant_id),
+        role=membership.role,
+        session=user_session,
+    )
+
+
+AuthDep = Annotated[AuthContext, Depends(current_auth)]
+
+
+def current_tenant(auth: AuthDep) -> Tenant:
+    """Organización activa de la sesión: todo acceso a datos de negocio se filtra por ella."""
+    return auth.tenant
 
 
 TenantDep = Annotated[Tenant, Depends(current_tenant)]

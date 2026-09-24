@@ -78,13 +78,26 @@ basta con definir un `Industry` en `industries.py` y agregar un dataset de ejemp
 - [x] 6 tipos de visualización: barras, líneas, dona, dispersión, KPI, tabla
 - [x] 3 plantillas de industria con detección automática
 - [x] Dashboards guardables y compartibles por enlace (revocable)
-- [x] Aislamiento por tenant en todas las consultas
+- [x] Aislamiento por organización en todas las consultas
+- [x] Registro e inicio de sesión (correo + contraseña)
+
+## Autenticación
+
+- Al registrarse se crean el usuario y su **organización** (el negocio), con rol
+  `owner`. Todos los datos (datasets, dashboards) pertenecen a la organización.
+- Contraseñas con hash **Argon2**. Bloqueo de 15 min tras 5 intentos fallidos.
+- Sesión en cookie `httpOnly` + `SameSite=Lax`; en la base solo se guarda el hash del
+  token, y cerrar sesión la revoca en el servidor.
+- En producción: `APP_COOKIE_SECURE=true` (solo HTTPS) y servir la web y la API bajo el
+  mismo dominio (p. ej. `app.midominio.com` y `api.midominio.com`) para que la cookie
+  se comparta.
 
 ## Pendiente antes de producción
 
-- **Autenticación real.** Hoy el tenant llega en la cabecera `X-Tenant-ID`
-  (`app/deps.py`) y el navegador genera uno por usuario. Hay que reemplazarlo por
-  auth (Clerk, Auth.js o Supabase Auth) y sacar el tenant del token.
+- **Invitar al equipo** a una organización (el modelo `Membership` ya lo soporta).
+- **Recuperar contraseña** y verificación de correo (requiere un proveedor de email,
+  p. ej. Resend).
+- Login con Google (opcional).
 - **Migraciones con Alembic** en lugar de `create_all` al arrancar.
 - **Postgres** en lugar de SQLite (solo cambia `APP_DATABASE_URL`) y **S3** para
   archivos (implementar `Storage` en `ingestion/storage.py`).

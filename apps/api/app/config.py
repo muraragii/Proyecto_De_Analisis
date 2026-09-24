@@ -14,5 +14,12 @@ class Settings(BaseSettings):
     max_upload_mb: int = 50
     cors_origins: list[str] = ["http://localhost:3000"]
 
+    session_cookie: str = "session"
+    session_days: int = 30
+    # En producción (HTTPS) debe ser True para que la cookie nunca viaje sin cifrar.
+    cookie_secure: bool = False
+    max_login_failures: int = 5
+    login_lockout_minutes: int = 15
+
 
 settings = Settings()
