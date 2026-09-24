@@ -4,6 +4,7 @@ export type SemanticType =
   | "numeric"
   | "categorical"
   | "datetime"
+  | "time"
   | "boolean"
   | "identifier"
   | "text";
@@ -50,7 +51,7 @@ export interface ChartSpec {
   title: string;
   x: string | null;
   y: string | null;
-  aggregation: "sum" | "mean" | "count" | null;
+  aggregation: "sum" | "mean" | "count" | "rate" | null;
   x_transform: string | null;
   group_by: string | null;
   per_day: boolean;
@@ -64,9 +65,10 @@ export interface ChartSpec {
 export type Point = { x: string | number | null; y: number | null; partial?: boolean };
 
 /** notes: aclaraciones para interpretar bien la cifra (top N, promedios diarios, huecos…). */
+/** unit "percent": valores 0–1 que se muestran como porcentaje. */
 export type ChartData =
-  | { value: number | null; notes?: string[] }
-  | { points: Point[]; notes?: string[] }
+  | { value: number | null; notes?: string[]; unit?: "percent" }
+  | { points: Point[]; notes?: string[]; unit?: "percent" }
   | { columns: string[]; rows: unknown[][]; total_rows: number };
 
 export interface RenderedChart {
@@ -224,7 +226,13 @@ const compactFormat = new Intl.NumberFormat("es-MX", {
   maximumFractionDigits: 1,
 });
 
-export function formatNumber(value: unknown, compact = false): string {
+const percentFormat = new Intl.NumberFormat("es-MX", {
+  style: "percent",
+  maximumFractionDigits: 1,
+});
+
+export function formatNumber(value: unknown, compact = false, unit?: "percent"): string {
   if (typeof value !== "number") return value == null ? "—" : String(value);
+  if (unit === "percent") return percentFormat.format(value);
   return (compact && Math.abs(value) >= 10_000 ? compactFormat : numberFormat).format(value);
 }

@@ -8,6 +8,7 @@ class SemanticType(StrEnum):
     NUMERIC = "numeric"
     CATEGORICAL = "categorical"
     DATETIME = "datetime"
+    TIME = "time"  # hora del día sin fecha ("11:38:36"); se combina con la columna de fecha
     BOOLEAN = "boolean"
     IDENTIFIER = "identifier"
     TEXT = "text"

@@ -20,6 +20,7 @@ AUTO = "auto"  # granularidad temporal elegida según el rango de fechas
 CAT = {SemanticType.CATEGORICAL}
 NUM = {SemanticType.NUMERIC}
 DATE = {SemanticType.DATETIME}
+BOOL = {SemanticType.BOOLEAN}
 
 
 @dataclass(frozen=True)
@@ -46,6 +47,7 @@ class Template:
     # Calcular por transacción (rol "order") si el dataset trae una fila por producto.
     per_order: bool = False
     per_day: bool = False  # promedio por día del calendario (ver ChartSpec.per_day)
+    count_distinct: str | None = None  # rol a contar sin repetir (p. ej. pacientes)
     unless: str | None = None  # omitir si este rol existe (hay una plantilla mejor)
 
 
@@ -139,7 +141,11 @@ RESTAURANTE = Industry(
         _role("covers", ["comensales", "personas", "pax", "cubiertos", "guests", "covers"], NUM,
               additive_only=True),
         _role("category", ["categoria", "category", "seccion", "tipo"], CAT),
-        _role("dish", ["platillo", "plato", "producto", "item", "articulo", "bebida", "menu"], CAT),
+        _role("dish", ["platillo", "plato", "producto", "item", "articulo", "bebida", "menu",
+                       # Solo palabras de comida: "descripción" o "nombre" también aparecen en
+                       # tiendas y harían pasar un e-commerce por restaurante.
+                       "pizza", "hamburguesa", "burger", "taco", "sushi", "bebida", "comida",
+                       "food", "dish"], CAT),
         _role("waiter", ["mesero", "mesera", "camarero", "camarera", "empleado", "waiter",
                          "server", "atendio"], CAT),
         _role("branch", ["sucursal", "local", "branch", "restaurante", "tienda"], CAT),
@@ -190,6 +196,12 @@ CLINICA = Industry(
               requires_time=True, shared=True),
         _role("revenue", _REVENUE + ["costo", "precio", "honorarios", "tarifa"], NUM,
               additive_only=True),
+        # Sí = el paciente NO llegó ("No-show", "inasistencia", "faltó")
+        _role("no_show", ["show", "noshow", "inasistencia", "ausencia", "ausente", "falto",
+                          "falta", "faltas"], BOOL),
+        # Sí = el paciente llegó ("asistió", "attended")
+        _role("attended", ["asistio", "asistencia", "attended", "asistida", "presente"], BOOL),
+        _role("patient", ["paciente", "patient"], IDENT | CAT),
         _role("specialty", ["especialidad", "specialty", "servicio", "area", "departamento"], CAT),
         _role("doctor", ["medico", "doctor", "doctora", "especialista", "profesional", "dr"], CAT),
         _role("status", ["estado", "estatus", "status", "asistencia", "asistio"],
@@ -197,8 +209,19 @@ CLINICA = Industry(
         _role("insurance", ["aseguradora", "seguro", "convenio", "insurance", "pagador"], CAT),
     ),
     templates=(
+        Template("Tasa de inasistencia", ChartType.KPI, Aggregation.RATE, 0.97,
+                 "Porcentaje de citas a las que el paciente no llegó: el indicador clave de "
+                 "una agenda médica.", y="no_show"),
+        Template("Tasa de asistencia", ChartType.KPI, Aggregation.RATE, 0.97,
+                 "Porcentaje de citas a las que el paciente llegó.", y="attended",
+                 unless="no_show"),
         Template("Citas en el tiempo", ChartType.LINE, Aggregation.COUNT, 0.95,
                  "Demanda de citas a lo largo del tiempo.", x="date", x_transform=AUTO),
+        Template("Inasistencia por día de la semana", ChartType.BAR, Aggregation.RATE, 0.91,
+                 "Qué días faltan más los pacientes (para recordatorios o sobrecupo).",
+                 x="date", y="no_show", x_transform=XTransform.WEEKDAY),
+        Template("Pacientes distintos", ChartType.KPI, Aggregation.COUNT, 0.88,
+                 "Cuántas personas diferentes atendió la agenda.", count_distinct="patient"),
         Template("Citas por médico", ChartType.BAR, Aggregation.COUNT, 0.93,
                  "Carga de trabajo por profesional.", x="doctor"),
         Template("Estado de las citas", ChartType.PIE, Aggregation.COUNT, 0.92,
@@ -257,9 +280,12 @@ def resolve_roles(profile: DatasetProfile, industry: Industry) -> dict[str, str]
                 continue
             rank = _match_rank(col, role.keywords)
             if rank is not None:
-                candidates.append((rank, col.name))
+                # A igual coincidencia, mejor la columna original que una calculada
+                # ("fecha" antes que "Fecha y hora") para no duplicar gráficos.
+                derived = "derived_datetime_from" in col.stats or "derived_from" in col.stats
+                candidates.append((rank, derived, col.name))
         if candidates:
-            name = min(candidates)[1]
+            name = min(candidates)[2]
             assigned[role.id] = name
             if not role.shared:
                 used.add(name)
@@ -278,9 +304,11 @@ def industry_specs(profile: DatasetProfile, industry: Industry) -> list[ChartSpe
         transform = t.x_transform
         if transform == AUTO:
             transform = time_granularity(profile.column(x))
+        if t.count_distinct and t.count_distinct not in roles:
+            continue
         y = roles.get(t.y) if t.y else None
-        group_by = roles.get("order") if t.per_order else None
-        if (group_by and y is None and t.chart_type == ChartType.KPI
+        group_by = roles.get("order") if t.per_order else roles.get(t.count_distinct)
+        if (t.per_order and group_by and y is None and t.chart_type == ChartType.KPI
                 and t.aggregation == Aggregation.COUNT):
             # Contar pedidos con importe = contar solo ventas (total > 0), no devoluciones.
             y = roles.get("revenue")

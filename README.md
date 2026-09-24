@@ -51,11 +51,16 @@ cd apps\api
 .venv\Scripts\python scripts\analizar_archivo.py ruta\al\archivo.xlsx
 ```
 
-Probado con [Online Retail II](https://archive.ics.uci.edu/dataset/502/online+retail+ii)
-(UCI, 1.07 M de filas, 2 hojas): subir y analizar ~22 s una vez; abrir el dataset ~2 s
-gracias a la caché Parquet. Cifras verificadas contra un cálculo independiente con pandas
-(40,078 pedidos, ticket promedio 523.30). Guarda estos archivos en `data-externa/`
-(ignorada por Git).
+Validado con datos reales públicos (guárdalos en `data-externa/`, ignorada por Git). Las
+cifras coinciden con un cálculo independiente en pandas y con los análisis publicados:
+
+| Dataset | Industria | Filas | Cifras verificadas |
+|---|---|---|---|
+| [Online Retail II](https://archive.ics.uci.edu/dataset/502/online+retail+ii) (UCI) | e-commerce | 1.07 M, 2 hojas | 40,078 pedidos · ticket promedio 523.30 |
+| [Pizza Place Sales](https://mavenanalytics.io/data-playground) (Maven) | restaurante | 48,620 | ventas 817,860 · 21,350 tickets · ticket 38.31 · viernes el mejor día |
+| [Medical Appointment No Shows](https://www.kaggle.com/datasets/joniarroba/noshowappointments) (Kaggle) | clínica | 110,527 | inasistencia 20.19% · 62,299 pacientes · SMS 27.6% vs 16.7% |
+
+Subir 1 M de filas toma ~22 s una vez; abrir el dataset ~2 s (caché Parquet).
 
 **Tests:**
 
@@ -106,6 +111,7 @@ es mejor no decir nada que afirmar algo falso, así que cada hallazgo pasa una p
 | Cambio reciente | Intervalo de predicción t al 99%, solo periodos completos |
 | Tendencia | Pendiente significativa al 99%, ≥ 8 periodos completos |
 | Día atípico | z robusto (mediana/MAD) en escala log; se excluye del patrón semanal |
+| Qué grupo falta más (tasa de inasistencia/asistencia) | Dos proporciones con corrección de Bonferroni; se redacta como asociación, no causa |
 | Concentración | Descriptivo (hecho de los datos) |
 
 `tests/test_insights.py` verifica que detecte efectos sembrados con la cifra correcta y que,

@@ -18,6 +18,7 @@ const TYPE_LABEL: Record<SemanticType, string> = {
   numeric: "Numérica",
   categorical: "Categórica",
   datetime: "Fecha",
+  time: "Hora del día",
   boolean: "Sí/No",
   identifier: "Identificador",
   text: "Texto libre",

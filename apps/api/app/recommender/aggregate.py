@@ -18,6 +18,7 @@ from app.recommender.schemas import Aggregation, ChartSpec, ChartType, XTransfor
 TABLE_ROWS = 100
 SCATTER_POINTS = 1000
 PIE_SLICES = 5
+MIN_RATE_BASE = 30
 WEEKDAYS = ["Lun", "Mar", "Mié", "Jue", "Vie", "Sáb", "Dom"]
 WEEKDAY_NAMES = ["lunes", "martes", "miércoles", "jueves", "viernes", "sábados", "domingos"]
 TIME_SERIES = {XTransform.DAY, XTransform.WEEK, XTransform.MONTH}
@@ -29,7 +30,8 @@ PERIOD_FREQ = {XTransform.DAY: "D", XTransform.WEEK: "W", XTransform.MONTH: "M"}
 def chart_data(df: pd.DataFrame, spec: ChartSpec) -> dict[str, Any]:
     if spec.chart_type == ChartType.KPI:
         value, notes = _kpi(df, spec)
-        return {"value": _clean(value), "notes": notes}
+        return {"value": _clean(value, digits=4 if _is_rate(spec) else 2), "notes": notes,
+                **({"unit": "percent"} if _is_rate(spec) else {})}
     if spec.chart_type == ChartType.TABLE:
         head = df.head(TABLE_ROWS)
         return {
@@ -53,7 +55,29 @@ def chart_data(df: pd.DataFrame, spec: ChartSpec) -> dict[str, Any]:
 # --- KPI ----------------------------------------------------------------------------------
 
 
+def _is_rate(spec: ChartSpec) -> bool:
+    return spec.aggregation == Aggregation.RATE
+
+
+TRUE_VALUES = {"si", "sí", "yes", "true", "verdadero", "y", "s", "1", "1.0"}
+FALSE_VALUES = {"no", "false", "falso", "n", "0", "0.0"}
+
+
+def as_flags(series: pd.Series) -> pd.Series:
+    """Columna sí/no -> 1.0 / 0.0 (NaN si el valor no es ni sí ni no)."""
+    if pd.api.types.is_bool_dtype(series):
+        return series.astype(float)
+    if pd.api.types.is_numeric_dtype(series):
+        return series.where(series.isin([0, 1])).astype(float)
+    text = series.astype("string").str.strip().str.lower()
+    return text.map(lambda v: 1.0 if v in TRUE_VALUES else 0.0 if v in FALSE_VALUES else np.nan,
+                    na_action="ignore").astype(float)
+
+
 def _kpi(df: pd.DataFrame, spec: ChartSpec) -> tuple[Any, list[str]]:
+    if _is_rate(spec):
+        flags = as_flags(df[spec.y]).dropna()
+        return flags.mean(), [f"Porcentaje de '{spec.y}' = Sí sobre {len(flags):,} filas con dato."]
     g = spec.group_by
     if g and spec.y and spec.aggregation in (Aggregation.COUNT, Aggregation.MEAN):
         # Por transacción, solo cuentan las ventas: las devoluciones/cancelaciones (total
@@ -85,7 +109,7 @@ def _grouped(df: pd.DataFrame, spec: ChartSpec) -> dict[str, Any]:
     x_col = df[spec.x]
     frame = pd.DataFrame({"x": _group_keys(x_col, spec.x_transform)})
     if spec.y:
-        frame["y"] = df[spec.y]
+        frame["y"] = as_flags(df[spec.y]) if _is_rate(spec) else df[spec.y]
     if spec.group_by:
         frame["g"] = df[spec.group_by]
     frame = frame.dropna(subset=["x"])
@@ -102,6 +126,14 @@ def _grouped(df: pd.DataFrame, spec: ChartSpec) -> dict[str, Any]:
         transform = spec.x_transform or XTransform.DAY
         result, partial = _complete_series(result, x_col, transform, spec, notes)
     else:
+        if _is_rate(spec):
+            # Un porcentaje sobre 3 filas no dice nada: solo categorías con base suficiente.
+            sizes = frame.dropna(subset=["y"]).groupby("x").size()
+            small = sizes[sizes < MIN_RATE_BASE].index
+            if len(small):
+                notes.append(f"Se omiten {len(small)} valores de '{spec.x}' con menos de "
+                             f"{MIN_RATE_BASE} registros.")
+                result = result.drop(small, errors="ignore")
         result = result.sort_values(ascending=False)
         if spec.chart_type == ChartType.PIE:
             result = _pie_slices(result, spec)
@@ -110,15 +142,18 @@ def _grouped(df: pd.DataFrame, spec: ChartSpec) -> dict[str, Any]:
             result = result.head(spec.limit)
 
     points = [
-        {"x": _label(k, spec.x_transform), "y": _clean(v), **({"partial": True} if k in partial else {})}
+        {"x": _label(k, spec.x_transform), "y": _clean(v, 4 if _is_rate(spec) else 2),
+         **({"partial": True} if k in partial else {})}
         for k, v in result.items()
     ]
-    return {"points": points, "notes": notes}
+    return {"points": points, "notes": notes, **({"unit": "percent"} if _is_rate(spec) else {})}
 
 
 def _aggregate(frame: pd.DataFrame, spec: ChartSpec) -> pd.Series:
     grouped = frame.groupby("x", sort=True)
     has_g = "g" in frame
+    if spec.aggregation == Aggregation.RATE:
+        return grouped["y"].mean()
     if spec.aggregation == Aggregation.COUNT or "y" not in frame:
         return grouped["g"].nunique() if has_g else grouped.size()
     if spec.aggregation == Aggregation.SUM:
@@ -134,12 +169,12 @@ def _complete_series(result, x_col, transform, spec, notes):
     first_day, last_day = x_col.min().normalize(), x_col.max().normalize()
     periods = pd.period_range(first_day, last_day, freq=PERIOD_FREQ[transform])
     index = periods.start_time
-    fill = np.nan if spec.aggregation == Aggregation.MEAN else 0
+    fill = np.nan if spec.aggregation in (Aggregation.MEAN, Aggregation.RATE) else 0
     missing = len(index.difference(result.index))
     result = result.reindex(index, fill_value=fill)
     name = PERIOD_NAME[transform]
 
-    if missing and spec.aggregation != Aggregation.MEAN:
+    if missing and spec.aggregation not in (Aggregation.MEAN, Aggregation.RATE):
         notes.append(f"{missing} {name}(s) sin registros se muestran en 0.")
 
     partial = set()
@@ -148,7 +183,7 @@ def _complete_series(result, x_col, transform, spec, notes):
             partial.add(index[0])
         if periods[-1].end_time.normalize() > last_day:
             partial.add(index[-1])
-        if partial and spec.aggregation != Aggregation.MEAN:
+        if partial and spec.aggregation not in (Aggregation.MEAN, Aggregation.RATE):
             which = " y ".join(
                 label for label, key in (("el primer", index[0]), ("el último", index[-1]))
                 if key in partial
@@ -168,10 +203,10 @@ def _complete_cyclic(result, x_col, spec, notes):
     else:
         hours = result.index
         index = pd.Index(range(int(hours.min()), int(hours.max()) + 1)) if len(hours) else hours
-    fill = np.nan if spec.aggregation == Aggregation.MEAN else 0
+    fill = np.nan if spec.aggregation in (Aggregation.MEAN, Aggregation.RATE) else 0
     result = result.reindex(index, fill_value=fill)
 
-    if spec.per_day and spec.aggregation != Aggregation.MEAN:
+    if spec.per_day and spec.aggregation not in (Aggregation.MEAN, Aggregation.RATE):
         days = pd.date_range(x_col.min().normalize(), x_col.max().normalize(), freq="D")
         if spec.x_transform == XTransform.WEEKDAY:
             occurrences = pd.Series(days.dayofweek).value_counts().reindex(index, fill_value=0)
@@ -187,7 +222,7 @@ def _complete_cyclic(result, x_col, spec, notes):
 
 
 def _pie_slices(result: pd.Series, spec: ChartSpec) -> pd.Series:
-    if spec.aggregation == Aggregation.MEAN:
+    if spec.aggregation in (Aggregation.MEAN, Aggregation.RATE):
         raise ValueError("un gráfico de pastel muestra partes de un total; no aplica a promedios")
     if (result < 0).any():
         raise ValueError("un gráfico de pastel no puede mostrar valores negativos")
@@ -225,16 +260,19 @@ def _label(key, transform: XTransform | None):
     return _clean(key)
 
 
-def _clean(value):
+def _clean(value, digits: int = 2):
     """Convierte tipos de numpy/pandas a JSON serializable."""
     if value is None or value is pd.NaT:
         return None
     if isinstance(value, pd.Timestamp):
         return value.isoformat()
+    if isinstance(value, pd.Timedelta):  # hora del día
+        seconds = int(value.total_seconds())
+        return f"{seconds // 3600:02d}:{seconds % 3600 // 60:02d}:{seconds % 60:02d}"
     if isinstance(value, (np.integer,)):
         return int(value)
     if isinstance(value, (float, np.floating)):
-        return None if math.isnan(value) else round(float(value), 2)
+        return None if math.isnan(value) else round(float(value), digits)
     if isinstance(value, np.bool_):
         return bool(value)
     try:

@@ -3,6 +3,7 @@ correctas calculadas a mano. Si alguno falla, la app estaría mostrando una cifr
 
 import io
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -312,3 +313,86 @@ def test_excel_totals_row():
     loaded = read_table(buf.getvalue(), "ventas.xlsx")
     assert loaded["ventas"].sum() == 30
     assert loaded.attrs["summary_rows"] == ["Total general"]
+
+
+def test_separate_date_and_time_columns_are_combined():
+    """Punto de venta con fecha y hora en columnas separadas (formato muy común)."""
+    rows = [f"{i},2025-01-{6 + i % 14:02d},{12 + i % 3}:{i % 60:02d}:00,Pizza,1,10"
+            for i in range(60)]
+    profile, df = load("pedido,fecha,hora,pizza,cantidad,precio_unitario\n" + "\n".join(rows))
+    assert profile.column("hora").semantic_type == SemanticType.TIME
+    combined = profile.column("Fecha y hora")
+    assert combined.stats["has_time"] and "date_time_combined" in warning_codes(profile)
+    assert df["Fecha y hora"].iloc[1] == pd.Timestamp("2025-01-07 13:01:00")
+    # la hora sola ya no genera gráficos de "hoy"
+    assert all(c.x != "hora" for c in recommend(profile).charts)
+    peak = next(c for c in recommend(profile).charts if c.x_transform == XTransform.HOUR)
+    assert peak.x == "Fecha y hora"
+    data = chart_data(df, peak)
+    assert "14 días" in data["notes"][0]  # promedio sobre días reales, no "1 día"
+
+
+def test_windows_1252_csv():
+    content = "producto,precio\nCafé “especial”,35\nTé,20\n".encode("cp1252")
+    df = read_table(content, "menu.csv")
+    assert df["producto"].tolist() == ["Café “especial”", "Té"]
+
+
+class TestClinic:
+    """Agenda médica con columna "No-show" (Sí = el paciente no llegó)."""
+
+    @staticmethod
+    def agenda(seed=0, sms_effect=0.0, n=3000):
+        rng = np.random.default_rng(seed)
+        days = pd.date_range("2016-04-25", periods=35, freq="D")
+        days = days[days.dayofweek < 5]  # cerrado fines de semana
+        sms = rng.random(n) < 0.3
+        no_show = rng.random(n) < (0.2 + sms_effect * sms)
+        return pd.DataFrame({
+            "PatientId": rng.integers(1, 1500, n) + 0.5 * (rng.random(n) < 0.01),  # IDs "rotos"
+            "AppointmentID": np.arange(n),
+            "AppointmentDay": rng.choice(days.strftime("%Y-%m-%dT00:00:00Z"), n),
+            "Age": np.where(np.arange(n) == 0, -1, rng.integers(0, 90, n)),
+            "Handcap": rng.choice([0, 0, 0, 0, 1, 2, 3], n),
+            "SMS_received": sms.astype(int),
+            "No-show": np.where(no_show, "Yes", "No"),
+        })
+
+    def test_types_and_quality(self):
+        profile, _ = profile_dataframe(self.agenda())
+        assert profile.column("PatientId").semantic_type == SemanticType.IDENTIFIER
+        assert profile.column("Handcap").semantic_type == SemanticType.CATEGORICAL
+        assert "impossible_values" in warning_codes(profile)
+
+    def test_timezone_dates_work(self):
+        profile, df = profile_dataframe(self.agenda())
+        assert df["AppointmentDay"].dt.tz is None
+        for spec in recommend(profile).charts:
+            chart_data(df, spec)  # antes: TypeError al comparar fechas con y sin zona
+
+    def test_no_show_rate(self):
+        raw = self.agenda()
+        profile, df = profile_dataframe(raw)
+        assert recommend(profile).industry == "clinica"
+        _, data = chart(profile, df, "Tasa de inasistencia")
+        assert data["unit"] == "percent"
+        assert data["value"] == pytest.approx((raw["No-show"] == "Yes").mean(), abs=1e-4)
+        _, patients = chart(profile, df, "Pacientes distintos")
+        assert patients["value"] == raw["PatientId"].nunique()
+
+    def test_rate_difference_insight(self):
+        from app.insights import generate_insights
+
+        profile, df = profile_dataframe(self.agenda(sms_effect=0.1))
+        found = {i.kind: i for i in generate_insights(profile, df)}
+        assert found["rate_segment"].text.startswith(
+            "Las citas con SMS_received = Sí tienen más inasistencia")
+
+    def test_rate_difference_no_false_positives(self):
+        from app.insights import generate_insights
+
+        hits = 0
+        for seed in range(20):
+            profile, df = profile_dataframe(self.agenda(seed=seed))
+            hits += any(i.kind == "rate_segment" for i in generate_insights(profile, df))
+        assert hits <= 1

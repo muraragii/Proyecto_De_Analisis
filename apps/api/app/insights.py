@@ -17,12 +17,14 @@ Ver tests/test_insights.py, incluido el control de falsos positivos con datos al
 import math
 from dataclasses import dataclass, field
 from enum import StrEnum
+from statistics import NormalDist
 
 import numpy as np
 import pandas as pd
 from pydantic import BaseModel
 
 from app.profiling import DatasetProfile, SemanticType
+from app.recommender.aggregate import as_flags
 from app.recommender.engine import AUTO
 from app.recommender.industries import INDUSTRIES, Industry, detect_industry, resolve_roles
 
@@ -30,6 +32,7 @@ MAX_INSIGHTS = 6
 ALPHA = 0.01  # nivel de significancia de las pruebas
 
 MIN_CATEGORIES = 5
+MIN_GENERIC_CATEGORIES = 10
 CONCENTRATION_SHARE = 0.5  # el 20% superior de categorías aporta al menos la mitad
 MIN_CHANGE = 0.10
 MIN_BASELINE_PERIODS = 4
@@ -37,11 +40,15 @@ MAX_BASELINE_PERIODS = 8
 MIN_TREND_PERIODS = 8
 MIN_TREND_SLOPE = 0.02
 MIN_WEEKDAY_WEEKS = 3
-MIN_WEEKDAY_RATIO = 1.25
+MIN_WEEKDAY_RATIO = 1.15
+LOW_ACTIVITY_SHARE = 0.2  # un día de la semana con < 20% de la actividad típica  # +15% ya importa para planear personal
 MIN_SEGMENT_N = 20
 MIN_SEGMENT_LIFT = 0.15
 MIN_PEAK_TX = 50
 PEAK_FACTOR = 1.5
+MIN_RATE_GROUP = 100
+MIN_RATE_DIFF = 0.02  # 2 puntos porcentuales
+MIN_RATE_LIFT = 0.20  # y 20% relativo
 MIN_ANOMALY_DAYS = 21
 ANOMALY_LOG_Z = 3.5
 ANOMALY_RATIO = 2.5
@@ -115,6 +122,11 @@ class _Context:
     unit: tuple[str, str]
     measure_noun: str
     dims: list[_Dim] = field(default_factory=list)
+    # Columna sí/no del resultado que importa (inasistencia/asistencia) y columnas con las
+    # que comparar su tasa: (columna, ¿es sí/no?).
+    flag: str | None = None
+    flag_role: str | None = None
+    rate_dims: list[tuple[str, bool]] = field(default_factory=list)
 
 
 def generate_insights(
@@ -127,7 +139,7 @@ def generate_insights(
         return []
 
     daily = _daily(ctx)
-    found: list[Insight | None] = [_peak_hours(ctx), _best_segment(ctx)]
+    found: list[Insight | None] = [_peak_hours(ctx), _best_segment(ctx), _rate_segment(ctx)]
     if daily is not None:
         found += [_anomaly(ctx, daily), _recent_change(ctx, daily), _trend(ctx, daily),
                   _weekday(ctx, daily), _closed_weekdays(ctx, daily)]
@@ -151,9 +163,11 @@ def _context(profile: DatasetProfile, df: pd.DataFrame, industry: Industry | Non
     time = roles.get("time")
     if not time and date and profile.column(date).stats.get("has_time"):
         time = date
-    measure = roles.get("revenue") or first(
+    # Con industria sin dinero (p. ej. una clínica) se cuentan transacciones (citas); una
+    # columna numérica cualquiera no es "el desempeño" del negocio.
+    measure = roles.get("revenue") or (None if industry else first(
         SemanticType.NUMERIC, pred=lambda c: c.additive is not False and c.geo_role is None
-    )
+    ))
     money = "revenue" in roles
     unit = industry.unit if industry else ("registro", "registros")
     if money:
@@ -173,8 +187,14 @@ def _context(profile: DatasetProfile, df: pd.DataFrame, industry: Industry | Non
 
     tx, dims = _transactions(df, roles.get("order"), measure, date, time, candidates)
     currency = profile.column(measure).stats.get("currency", "") if money else ""
+    flag_role = next((r for r in ("no_show", "attended") if r in roles), None)
+    flag = roles.get(flag_role) if flag_role else None
+    rate_dims = [(c.name, c.semantic_type == SemanticType.BOOLEAN)
+                 for c in profile.of_type(SemanticType.CATEGORICAL, SemanticType.BOOLEAN)
+                 if c.name != flag and 2 <= c.n_unique <= 10]
     return _Context(df=df, tx=tx, measure=measure, money=money, currency=currency, unit=unit,
-                    measure_noun=measure_noun, dims=dims)
+                    measure_noun=measure_noun, dims=dims, flag=flag, flag_role=flag_role,
+                    rate_dims=rate_dims)
 
 
 def _transactions(df, order, measure, date, time, candidates):
@@ -456,7 +476,10 @@ def _weekday(ctx: _Context, daily: pd.Series) -> Insight | None:
     if counts.min() < MIN_WEEKDAY_WEEKS:
         return None
     means = pd.Series(_group_means(daily.to_numpy(dtype=float), weekday))
-    open_days = [d for d in range(7) if means[d] > 0]  # los días cerrados se reportan aparte
+    # Días cerrados (se reportan aparte) o casi cerrados (un sábado con 3 citas) no sirven
+    # de base: inflarían la ventaja del mejor día.
+    typical = means[means > 0].median() if (means > 0).any() else 0
+    open_days = [d for d in range(7) if means[d] > LOW_ACTIVITY_SHARE * typical]
     if len(open_days) < 2:
         return None
     mask = np.isin(weekday, open_days)
@@ -503,11 +526,11 @@ def _closed_weekdays(ctx: _Context, daily: pd.Series) -> Insight | None:
     closed = [d for d in range(7) if (daily[weekday == d] == 0).all()]
     if not closed or len(closed) > 2:
         return None
-    names = " ni ".join(WEEKDAYS_PLURAL[d] for d in closed)
+    names = " ni en ningún ".join(WEEKDAYS[d] for d in closed)
     return Insight(
         kind="closed_days",
         title="Días sin actividad",
-        text=f"No hay {ctx.unit[1]} registrados ningún {names} del periodo. Si no es tu día de "
+        text=f"No hay {ctx.unit[1]} en ningún {names} del periodo. Si no es tu día de "
              "descanso, podría faltar información en el archivo.",
         basis=f"{counts.min()}+ semanas de datos.",
         score=0.5,
@@ -556,7 +579,10 @@ def _concentration(ctx: _Context, dim: _Dim) -> Insight | None:
     totals = values.groupby(ctx.df[dim.column]).sum().sort_values(ascending=False)
     totals = totals[totals > 0]
     n = len(totals)
-    if n < MIN_CATEGORIES:
+    # Para entidades (productos, clientes, médicos) basta con 5; para una columna cualquiera
+    # con pocos valores (una escala 0-4) "el 0 concentra el 98%" es una distribución, no
+    # una concentración interesante.
+    if n < (MIN_CATEGORIES if dim.role else MIN_GENERIC_CATEGORIES):
         return None
     top_n = math.ceil(0.2 * n)
     share = totals.iloc[:top_n].sum() / totals.sum()
@@ -627,6 +653,54 @@ def _best_segment(ctx: _Context) -> Insight | None:
         basis=f"{len(group):,} vs. {len(rest):,} {ctx.unit[1]}; prueba de permutación, "
               f"p = {p:.3f}.",
         score=0.6,
+    )
+
+
+def _rate_segment(ctx: _Context) -> Insight | None:
+    """¿Qué grupo tiene una tasa de inasistencia (o asistencia) distinta al resto? Prueba de
+    dos proporciones con corrección de Bonferroni por todas las comparaciones hechas."""
+    if not ctx.flag:
+        return None
+    flags = as_flags(ctx.df[ctx.flag])
+    tests = []
+    for column, is_bool in ctx.rate_dims:
+        keys = as_flags(ctx.df[column]).map({1.0: "Sí", 0.0: "No"}) if is_bool else ctx.df[column]
+        data = pd.DataFrame({"g": keys, "y": flags}).dropna()
+        stats = data.groupby("g")["y"].agg(["sum", "count"])
+        total_n, total_s = stats["count"].sum(), stats["sum"].sum()
+        if not 2 <= len(stats) <= 10 or total_n == 0:
+            continue
+        p = total_s / total_n
+        for group, (s_g, n_g) in stats.iterrows():
+            if is_bool and group != "Sí":
+                continue  # "No" es el espejo de "Sí"
+            n_r, s_r = total_n - n_g, total_s - s_g
+            if n_g < MIN_RATE_GROUP or n_r < MIN_RATE_GROUP or not 0 < p < 1:
+                continue
+            p_g, p_r = s_g / n_g, s_r / n_r
+            z = (p_g - p_r) / math.sqrt(p * (1 - p) * (1 / n_g + 1 / n_r))
+            tests.append((column, is_bool, group, p_g, p_r, int(n_g), int(n_r), z))
+    if not tests:
+        return None
+    z_crit = NormalDist().inv_cdf(1 - ALPHA / (2 * len(tests)))
+    valid = [t for t in tests if abs(t[7]) >= z_crit and abs(t[3] - t[4]) >= MIN_RATE_DIFF
+             and t[4] > 0 and abs(t[3] / t[4] - 1) >= MIN_RATE_LIFT]
+    if not valid:
+        return None
+    column, is_bool, group, p_g, p_r, n_g, n_r, _ = max(valid, key=lambda t: abs(t[3] - t[4]))
+    noun = "inasistencia" if ctx.flag_role == "no_show" else "asistencia"
+    more = p_g > p_r
+    bad = more == (ctx.flag_role == "no_show")
+    who = f"con {column} = Sí" if is_bool else f"con {column} = {_label(group)}"
+    return Insight(
+        kind="rate_segment",
+        title=f"Diferencia en {noun}",
+        text=f"Las {ctx.unit[1]} {who} tienen {'más' if more else 'menos'} {noun}: "
+             f"{p_g * 100:.1f}% vs {p_r * 100:.1f}% en el resto.",
+        tone=Tone.NEGATIVE if bad else Tone.POSITIVE,
+        basis=f"{n_g:,} vs {n_r:,} {ctx.unit[1]}; prueba de proporciones corregida por "
+              f"{len(tests)} comparaciones. Es una asociación, no necesariamente la causa.",
+        score=0.82,
     )
 
 

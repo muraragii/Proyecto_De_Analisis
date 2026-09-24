@@ -99,6 +99,7 @@ export function ChartCard({
 /** Qué mide exactamente el eje Y / la cifra, en palabras. */
 function describeMeasure(spec: RenderedChart["spec"]): string {
   const unit = spec.group_by ? `${spec.group_by}s distintos` : "Registros";
+  if (spec.aggregation === "rate") return `% con ${spec.y} = Sí`;
   if (spec.aggregation === "count" || !spec.y) {
     return spec.per_day ? `${unit} por día (promedio)` : unit;
   }
@@ -116,7 +117,7 @@ function ChartBody({ chart, data }: { chart: RenderedChart; data: ChartData }) {
   if ("value" in data) {
     return (
       <div>
-        <p className="text-3xl font-semibold">{formatNumber(data.value)}</p>
+        <p className="text-3xl font-semibold">{formatNumber(data.value, false, data.unit)}</p>
         <p className="mt-1 text-xs text-muted">{describeMeasure(spec)}</p>
       </div>
     );
@@ -126,6 +127,7 @@ function ChartBody({ chart, data }: { chart: RenderedChart; data: ChartData }) {
   if (data.points.length === 0) return <p className="text-sm text-muted">Sin datos</p>;
 
   const yLabel = describeMeasure(spec);
+  const unit = data.unit;
   const axis = {
     stroke: theme.axis,
     tick: { fill: theme["text-muted"], fontSize: 12 },
@@ -149,7 +151,7 @@ function ChartBody({ chart, data }: { chart: RenderedChart; data: ChartData }) {
           >
             <div style={{ color: theme["text-secondary"] }}>{label ?? point.x}</div>
             <div style={{ color: theme["text-primary"] }}>
-              {yLabel}: <strong>{formatNumber(point.y)}</strong>
+              {yLabel}: <strong>{formatNumber(point.y, false, unit)}</strong>
             </div>
             {point.partial && (
               <div style={{ color: theme["text-muted"] }}>Periodo incompleto en los datos</div>
@@ -160,7 +162,9 @@ function ChartBody({ chart, data }: { chart: RenderedChart; data: ChartData }) {
     />
   );
   const grid = <CartesianGrid stroke={theme.grid} vertical={false} />;
-  const yAxis = <YAxis {...axis} axisLine={false} width={56} tickFormatter={(v) => formatNumber(v, true)} />;
+  const yAxis = (
+    <YAxis {...axis} axisLine={false} width={56} tickFormatter={(v) => formatNumber(v, true, unit)} />
+  );
   const frame = (child: ReactNode) => (
     <div className="h-60">
       <ResponsiveContainer width="100%" height="100%">

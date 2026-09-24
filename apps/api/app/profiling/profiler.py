@@ -25,6 +25,7 @@ from app.text import name_tokens
 # Proporción mínima de valores no nulos que deben convertirse para aceptar un tipo.
 PARSE_THRESHOLD = 0.9
 MAX_CATEGORIES = 50
+MAX_LEVELS = 5  # enteros con tan pocos valores distintos son una escala, no una cantidad
 MAX_CATEGORY_RATIO = 0.5
 LONG_TEXT_CHARS = 40
 TOP_VALUES = 10
@@ -65,6 +66,8 @@ ADDITIVE_TOKENS = {
 # El precio unitario no se suma cuando existe una columna de cantidad (la venta es
 # precio x cantidad). Sin cantidad, cada fila suele ser una venta y sí se suma.
 PRICE_TOKENS = {"precio", "price", "unitario", "unit"}
+AGE_TOKENS = {"edad", "age", "anos"}
+MAX_AGE = 110
 QUANTITY_TOKENS = {"cantidad", "qty", "quantity", "unidades", "units", "piezas"}
 LINE_TOTAL_TOKENS = {"total", "subtotal", "importe", "monto", "amount"}
 # Columnas que ya son el importe de la venta (si existe una, no se calcula cantidad x precio).
@@ -72,6 +75,7 @@ MONEY_TOKENS = {"total", "subtotal", "importe", "monto", "amount", "venta", "ven
                 "ingresos", "revenue", "sales", "facturacion"}
 
 _DATE_LIKE = re.compile(r"\d.*[-/:.]|[a-zA-Z]{3,}.*\d|\d.*[a-zA-Z]{3,}")
+_TIME_OF_DAY = re.compile(r"\d{1,2}:\d{2}(:\d{2}(\.\d+)?)?\s*([ap]\.?\s?m\.?)?", re.IGNORECASE)
 _DAY_MONTH = re.compile(r"^\s*(\d{1,2})[/\-.](\d{1,2})[/\-.]\d{2,4}")
 _CURRENCY_CHARS = re.compile(r"[$€£%\s]|MXN|USD|EUR|COP|ARS|CLP|PEN", re.IGNORECASE)
 _THOUSANDS_COMMA = re.compile(r"^-?\d{1,3}(,\d{3})+(\.\d+)?$")
@@ -101,6 +105,16 @@ def profile_dataframe(df: pd.DataFrame) -> tuple[DatasetProfile, pd.DataFrame]:
             column.additive = _is_additive(column, df[column.name], has_quantity)
             issues += _value_issues(column, coerced[column.name])
 
+    combined = _combine_date_and_time(columns, coerced)
+    if combined is not None:
+        columns.append(combined)
+        date, time = combined.stats["derived_datetime_from"]
+        issues.append(DataWarning(
+            level=WarningLevel.INFO, code="date_time_combined", column=combined.name,
+            message=f"La fecha y la hora vienen en columnas separadas: se combinaron "
+                    f"'{date}' y '{time}' en '{combined.name}' para analizar horarios.",
+        ))
+
     derived = _derive_line_total(columns, coerced)
     if derived is not None:
         columns.append(derived)
@@ -120,6 +134,10 @@ def coerce_dataframe(df: pd.DataFrame, profile: DatasetProfile) -> pd.DataFrame:
     """Reaplica las conversiones de un perfil guardado a un DataFrame recién leído."""
     coerced = df.copy()
     for col in profile.columns:
+        if datetime_from := col.stats.get("derived_datetime_from"):
+            date, time = datetime_from
+            coerced[col.name] = coerced[date].dt.normalize() + coerced[time]
+            continue
         if derived_from := col.stats.get("derived_from"):
             quantity, price = derived_from
             coerced[col.name] = coerced[quantity] * coerced[price]
@@ -130,6 +148,8 @@ def coerce_dataframe(df: pd.DataFrame, profile: DatasetProfile) -> pd.DataFrame:
             coerced[col.name] = _to_numeric(coerced[col.name])
         elif col.semantic_type == SemanticType.DATETIME:
             coerced[col.name] = _to_datetime(coerced[col.name], col.stats.get("date_order"))
+        elif col.semantic_type == SemanticType.TIME:
+            coerced[col.name] = _to_time_of_day(coerced[col.name])
     return coerced
 
 
@@ -143,7 +163,7 @@ def _infer(series: pd.Series, name: str) -> tuple[SemanticType, pd.Series, dict]
     if pd.api.types.is_bool_dtype(series):
         return SemanticType.BOOLEAN, series, {}
     if pd.api.types.is_datetime64_any_dtype(series):
-        return SemanticType.DATETIME, series, {}
+        return SemanticType.DATETIME, _without_timezone(series), {}
     if pd.api.types.is_numeric_dtype(series):
         return _classify_numeric(values, tokens), series, {}
 
@@ -166,6 +186,9 @@ def _infer(series: pd.Series, name: str) -> tuple[SemanticType, pd.Series, dict]
             extra["currency"] = symbols.mode().iloc[0]  # solo si el archivo la trae
         return semantic_type, numeric, extra
 
+    if as_text.str.fullmatch(_TIME_OF_DAY).mean() >= PARSE_THRESHOLD:
+        return SemanticType.TIME, _to_time_of_day(series), {}
+
     if as_text.str.contains(_DATE_LIKE).mean() >= PARSE_THRESHOLD:
         order = _date_order(as_text)
         dates = _to_datetime(series, order)
@@ -184,13 +207,19 @@ def _classify_numeric(values: pd.Series, tokens: set[str]) -> SemanticType:
         return SemanticType.BOOLEAN
     unique_ratio = values.nunique() / len(values) if len(values) else 0
     is_integer = len(values) and np.all(np.mod(values, 1) == 0)
-    if tokens & ID_TOKENS and (is_integer or unique_ratio > 0.9):
-        # "Customer ID" se repite en muchas filas pero sigue siendo una clave: nunca se suma.
+    if tokens & ID_TOKENS:
+        # "Customer ID" se repite en muchas filas y "PatientId" a veces trae decimales por
+        # errores de exportación; siguen siendo claves: nunca se suman.
         few = values.nunique() <= MAX_CATEGORIES
         return SemanticType.CATEGORICAL if few and unique_ratio < 0.9 else SemanticType.IDENTIFIER
     if is_integer and _is_order_key(tokens):
         return SemanticType.IDENTIFIER
     if is_integer and tokens & CODE_TOKENS and values.nunique() <= MAX_CATEGORIES:
+        return SemanticType.CATEGORICAL
+    if (is_integer and 2 <= values.nunique() <= MAX_LEVELS and len(values) >= 50
+            and not tokens & (ADDITIVE_TOKENS | QUANTITY_TOKENS | PRICE_TOKENS)):
+        # Escalas/niveles (0-4, 1-5): "Handcap", "nivel_dolor", "satisfaccion". Sumarlos no
+        # tiene sentido; como categoría sirven para agrupar.
         return SemanticType.CATEGORICAL
     if is_integer and unique_ratio == 1 and len(values) >= 20 and values.is_monotonic_increasing:
         return SemanticType.IDENTIFIER
@@ -229,6 +258,35 @@ def _is_additive(column: ColumnProfile, original: pd.Series, has_quantity: bool)
 
 
 DERIVED_TOTAL_NAME = "Importe (calculado)"
+DERIVED_DATETIME_NAME = "Fecha y hora"
+
+
+def _to_time_of_day(series: pd.Series) -> pd.Series:
+    """'11:38:36' / '7:05 pm' / datetime.time -> tiempo transcurrido desde medianoche."""
+    if pd.api.types.is_timedelta64_dtype(series):
+        return series
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        parsed = pd.to_datetime(series.astype("string").str.strip(), errors="coerce",
+                                format="mixed")
+    return parsed - parsed.dt.normalize()
+
+
+def _combine_date_and_time(columns: list[ColumnProfile], coerced: pd.DataFrame):
+    """Muchos puntos de venta exportan la fecha y la hora en columnas separadas; sin
+    combinarlas no hay análisis de horarios (y la hora sola parecería una fecha de hoy)."""
+    times = [c for c in columns if c.semantic_type == SemanticType.TIME]
+    dates = [c for c in columns if c.semantic_type == SemanticType.DATETIME
+             and not c.stats.get("has_time")]
+    if not times or not dates or DERIVED_DATETIME_NAME in coerced.columns:
+        return None
+    date, time = dates[0], times[0]
+    coerced[DERIVED_DATETIME_NAME] = coerced[date.name].dt.normalize() + coerced[time.name]
+    column = _describe(DERIVED_DATETIME_NAME, coerced[DERIVED_DATETIME_NAME],
+                       coerced[DERIVED_DATETIME_NAME], SemanticType.DATETIME)
+    column.source_dtype = "calculada"
+    column.stats["derived_datetime_from"] = [date.name, time.name]
+    return column
 
 
 def _derive_line_total(columns: list[ColumnProfile], coerced: pd.DataFrame) -> ColumnProfile | None:
@@ -314,14 +372,23 @@ def _date_order(text: pd.Series) -> str | None:
 
 def _to_datetime(series: pd.Series, order: str | None = None) -> pd.Series:
     if pd.api.types.is_datetime64_any_dtype(series):
-        return series
+        return _without_timezone(series)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         if order is None:
             iso = pd.to_datetime(series, errors="coerce", format="ISO8601")
             if iso.notna().sum() >= PARSE_THRESHOLD * series.notna().sum():
-                return iso
-        return pd.to_datetime(series, errors="coerce", format="mixed", dayfirst=order != "mdy")
+                return _without_timezone(iso)
+        parsed = pd.to_datetime(series, errors="coerce", format="mixed", dayfirst=order != "mdy")
+        return _without_timezone(parsed)
+
+
+def _without_timezone(series: pd.Series) -> pd.Series:
+    """'2016-04-29T18:38:08Z' trae zona horaria; se conserva la hora tal como está escrita
+    (la del negocio) y se quita la zona, para que todas las fechas sean comparables."""
+    if isinstance(series.dtype, pd.DatetimeTZDtype):
+        return series.dt.tz_localize(None)
+    return series
 
 
 # --- Estadísticas -------------------------------------------------------------------------
@@ -421,6 +488,15 @@ def _conversion_issues(column: ColumnProfile, original: pd.Series, parsed: pd.Se
 def _value_issues(column: ColumnProfile, values: pd.Series) -> list:
     values = values.dropna()
     issues = []
+    if set(name_tokens(column.name)) & AGE_TOKENS:
+        impossible = values[(values < 0) | (values > MAX_AGE)]
+        if len(impossible):
+            examples = ", ".join(f"{v:g}" for v in sorted(impossible.unique())[:3])
+            issues.append(DataWarning(
+                level=WarningLevel.WARNING, code="impossible_values", column=column.name,
+                message=f"{len(impossible)} valor(es) de '{column.name}' son imposibles para una "
+                        f"edad ({examples}). Revisa la captura; afectan los promedios.",
+            ))
     if len(values) >= 20:
         q1, q3 = values.quantile([0.25, 0.75])
         iqr = q3 - q1

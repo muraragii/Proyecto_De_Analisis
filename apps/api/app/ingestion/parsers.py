@@ -8,7 +8,9 @@ from pathlib import PurePath
 import pandas as pd
 
 SUPPORTED_EXTENSIONS = {".csv", ".txt", ".xlsx", ".xls"}
-CSV_ENCODINGS = ("utf-8-sig", "latin-1")
+# cp1252: la de los CSV que exporta Excel en Windows (comillas tipográficas, €, ñ).
+# latin-1 al final: nunca falla, pero confunde esos caracteres.
+CSV_ENCODINGS = ("utf-8-sig", "cp1252", "latin-1")
 
 
 class UnsupportedFileError(ValueError):

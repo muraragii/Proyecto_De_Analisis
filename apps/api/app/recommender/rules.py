@@ -12,6 +12,7 @@ from app.recommender.schemas import Aggregation, ChartSpec, ChartType, XTransfor
 MAX_MEASURES = 4
 MAX_DIMENSIONS = 4
 MAX_DATES = 2
+MAX_BOOLEANS = 3
 MAX_BAR_CATEGORIES = 30
 MAX_PIE_CATEGORIES = 6
 BAR_LIMIT = 15
@@ -36,7 +37,9 @@ def dimensions(profile: DatasetProfile) -> list[ColumnProfile]:
 
 
 def dates(profile: DatasetProfile) -> list[ColumnProfile]:
-    return [c for c in profile.of_type(SemanticType.DATETIME) if c.n_unique > 1]
+    # "Fecha y hora" combinada repetiría los gráficos de su columna de fecha.
+    return [c for c in profile.of_type(SemanticType.DATETIME)
+            if c.n_unique > 1 and "derived_datetime_from" not in c.stats]
 
 
 def time_granularity(column: ColumnProfile) -> XTransform:
@@ -90,6 +93,34 @@ def generic_rules(profile: DatasetProfile) -> list[ChartSpec]:
                 else f"'{m.name}' no se puede sumar (precio, %, calificación…): se promedia.",
             )
         )
+
+    # Columnas sí/no -> porcentaje (p. ej. "% de citas con No-show = Sí")
+    categoricals = [d for d in ds if d.semantic_type == SemanticType.CATEGORICAL]
+    for i, b in enumerate(profile.of_type(SemanticType.BOOLEAN)[:MAX_BOOLEANS]):
+        specs.append(
+            ChartSpec(
+                chart_type=ChartType.KPI,
+                title=f"% con {b.name} = Sí",
+                y=b.name,
+                aggregation=Aggregation.RATE,
+                score=0.5 - DECAY * i,
+                reason=f"'{b.name}' es sí/no: su porcentaje resume la columna.",
+            )
+        )
+        if categoricals:
+            d = categoricals[0]
+            specs.append(
+                ChartSpec(
+                    chart_type=ChartType.BAR,
+                    title=f"% con {b.name} = Sí por {d.name}",
+                    x=d.name,
+                    y=b.name,
+                    aggregation=Aggregation.RATE,
+                    limit=BAR_LIMIT,
+                    score=0.45 - DECAY * i,
+                    reason=f"Compara la proporción de '{b.name}' entre valores de '{d.name}'.",
+                )
+            )
 
     # Serie temporal + numérica -> líneas
     for i, t in enumerate(ts):

@@ -16,6 +16,7 @@ class Aggregation(StrEnum):
     SUM = "sum"
     MEAN = "mean"
     COUNT = "count"
+    RATE = "rate"  # % de filas en que una columna sí/no vale "sí" (p. ej. tasa de inasistencia)
 
 
 class XTransform(StrEnum):
