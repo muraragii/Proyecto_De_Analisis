@@ -19,6 +19,8 @@ Monorepo: `apps/api` (FastAPI + pandas) y `apps/web` (Next.js 16 + Recharts). Ve
   es una cookie httpOnly. En tests, `make_client()` + `register()` de `tests/conftest.py`.
 - Frontend: rutas públicas en `PUBLIC_PREFIXES` de `components/AuthProvider.tsx`; el
   resto exige sesión. Las peticiones van con `credentials: "include"`.
+- Todo `ChartSpec` (recomendado o del usuario) debe pasar `validate_spec`; hay un test que
+  lo verifica para las recomendaciones. Reglas nuevas de gráficos: agregar su validación.
 - El motor de recomendación es puro (perfil → `ChartSpec`); el cálculo de datos
   vive en `recommender/aggregate.py`. No mezclar.
 - Cada industria nueva: `Industry` en `recommender/industries.py` + dataset en

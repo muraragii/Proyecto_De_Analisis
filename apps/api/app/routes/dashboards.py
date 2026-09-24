@@ -9,6 +9,7 @@ from app.models import Dashboard, new_share_token
 from app.profiling import DatasetProfile
 from app.insights import generate_insights
 from app.recommender import INDUSTRIES, ChartSpec
+from app.recommender.validation import validate_spec
 from app.services import get_dashboard, get_dataset, load_dataframe, render_charts
 
 router = APIRouter(tags=["dashboards"])
@@ -50,11 +51,10 @@ def _out(
 
 
 def _validate_columns(profile: DatasetProfile, charts: list[ChartSpec]) -> None:
-    names = {c.name for c in profile.columns}
     for spec in charts:
-        for col in (spec.x, spec.y):
-            if col is not None and col not in names:
-                raise HTTPException(422, f"La columna '{col}' no existe en el dataset")
+        check = validate_spec(profile, spec)
+        if not check.ok:
+            raise HTTPException(422, f"'{spec.title}': {check.errors[0]}")
 
 
 def _rendered(storage, session, dashboard: Dashboard) -> tuple[list[dict], list[dict]]:

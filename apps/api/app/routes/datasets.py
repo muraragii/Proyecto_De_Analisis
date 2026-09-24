@@ -10,7 +10,8 @@ from app.ingestion.parsers import SUPPORTED_EXTENSIONS, UnsupportedFileError, fi
 from app.insights import generate_insights
 from app.models import Dataset
 from app.profiling import DatasetProfile, profile_dataframe
-from app.recommender import detect_industry, recommend
+from app.recommender import ChartSpec, detect_industry, recommend
+from app.recommender.validation import validate_spec
 from app.services import get_dataset, load_dataframe, render_charts, save_cache
 
 router = APIRouter(prefix="/datasets", tags=["datasets"])
@@ -118,3 +119,18 @@ def dataset_recommendations(
         "charts": render_charts(df, rec.charts),
         "insights": [i.model_dump() for i in generate_insights(profile, df, rec.industry)],
     }
+
+
+@router.post("/{dataset_id}/chart-preview")
+def chart_preview(
+    dataset_id: str, spec: ChartSpec, tenant: TenantDep, session: SessionDep, storage: StorageDep
+):
+    """Vista previa de un gráfico armado por el usuario. Nunca responde error por una
+    combinación inválida: devuelve los motivos para mostrarlos junto al formulario."""
+    dataset = get_dataset(session, tenant.id, dataset_id)
+    check = validate_spec(DatasetProfile.model_validate(dataset.profile), spec)
+    if not check.ok:
+        return {"spec": spec.model_dump(), "data": None, "error": None,
+                "errors": check.errors, "warnings": check.warnings}
+    rendered = render_charts(load_dataframe(storage, dataset), [spec])[0]
+    return {**rendered, "errors": [], "warnings": check.warnings}

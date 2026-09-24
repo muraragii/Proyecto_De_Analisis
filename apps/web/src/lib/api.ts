@@ -77,6 +77,13 @@ export interface RenderedChart {
   error: string | null;
 }
 
+/** Vista previa de un gráfico armado por el usuario: errors impide guardarlo; warnings
+ *  explica por qué la combinación puede ser engañosa, pero se permite. */
+export interface ChartPreview extends RenderedChart {
+  errors: string[];
+  warnings: string[];
+}
+
 /** Hallazgo en texto. basis: sobre qué datos y con qué prueba se calculó. */
 export interface Insight {
   kind: string;
@@ -205,7 +212,14 @@ export const api = {
     request<Recommendations>(
       `/datasets/${id}/recommendations?industry=${encodeURIComponent(industry)}`,
     ),
+  previewChart: (datasetId: string, spec: ChartSpec) =>
+    request<ChartPreview>(`/datasets/${datasetId}/chart-preview`, {
+      method: "POST",
+      body: JSON.stringify(spec),
+    }),
   dashboards: () => request<Dashboard[]>("/dashboards"),
+  updateDashboard: (id: string, body: { title?: string; charts?: ChartSpec[] }) =>
+    request<Dashboard>(`/dashboards/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
   dashboard: (id: string) => request<Dashboard>(`/dashboards/${id}`),
   createDashboard: (body: {
     dataset_id: string;

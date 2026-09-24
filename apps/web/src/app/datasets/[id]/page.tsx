@@ -2,6 +2,7 @@
 
 import { useParams, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
+import { ChartEditor } from "@/components/ChartEditor";
 import { ChartGrid } from "@/components/ChartGrid";
 import { Insights } from "@/components/Insights";
 import {
@@ -11,6 +12,7 @@ import {
   type Dataset,
   type Industry,
   type Recommendations,
+  type RenderedChart,
   type SemanticType,
 } from "@/lib/api";
 
@@ -59,7 +61,10 @@ export default function DatasetPage() {
   const [industries, setIndustries] = useState<Industry[]>([]);
   const [industry, setIndustry] = useState("auto");
   const [rec, setRec] = useState<Recommendations | null>(null);
+  // Gráficos en pantalla: los recomendados más los que el usuario crea o edita.
+  const [charts, setCharts] = useState<RenderedChart[]>([]);
   const [selected, setSelected] = useState<Set<number>>(new Set());
+  const [editing, setEditing] = useState<{ index: number | null } | null>(null);
   const [title, setTitle] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -81,6 +86,7 @@ export default function DatasetPage() {
       .then((r) => {
         if (stale) return;
         setRec(r);
+        setCharts(r.charts);
         setSelected(new Set(r.charts.map((_, i) => i)));
       })
       .catch((e) => !stale && setError(e.message));
@@ -97,7 +103,7 @@ export default function DatasetPage() {
         dataset_id: id,
         title,
         industry: rec.industry,
-        charts: rec.charts.filter((_, i) => selected.has(i)).map((c) => c.spec),
+        charts: charts.filter((_, i) => selected.has(i)).map((c) => c.spec),
       });
       router.push(`/dashboards/${dashboard.id}`);
     } catch (e) {
@@ -195,9 +201,45 @@ export default function DatasetPage() {
 
       {rec && <Insights insights={rec.insights} />}
 
+      {rec && (
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <p className="text-sm text-ink-2">
+            ¿No es lo que necesitas? Edita cualquier gráfico o crea el tuyo.
+          </p>
+          <button
+            onClick={() => setEditing({ index: null })}
+            className="rounded-lg border border-accent px-3 py-2 text-sm font-medium text-accent"
+          >
+            + Crear gráfico
+          </button>
+        </div>
+      )}
+
+      {editing && dataset.profile && (
+        <ChartEditor
+          datasetId={id}
+          columns={dataset.profile.columns}
+          initial={editing.index === null ? undefined : charts[editing.index].spec}
+          onClose={() => setEditing(null)}
+          onSave={(chart) => {
+            if (editing.index === null) {
+              // Los nuevos van primero y seleccionados: es lo que el usuario pidió.
+              setCharts((prev) => [chart, ...prev]);
+              setSelected((prev) => new Set([0, ...[...prev].map((i) => i + 1)]));
+            } else {
+              const index = editing.index;
+              setCharts((prev) => prev.map((c, i) => (i === index ? chart : c)));
+              setSelected((prev) => new Set(prev).add(index));
+            }
+            setEditing(null);
+          }}
+        />
+      )}
+
       {rec ? (
         <ChartGrid
-          charts={rec.charts}
+          charts={charts}
+          onEdit={(i) => setEditing({ index: i })}
           isSelected={(i) => selected.has(i)}
           onToggle={(i) =>
             setSelected((prev) => {

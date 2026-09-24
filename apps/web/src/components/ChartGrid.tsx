@@ -6,10 +6,14 @@ export function ChartGrid({
   charts,
   isSelected,
   onToggle,
+  onEdit,
+  onRemove,
 }: {
   charts: RenderedChart[];
   isSelected?: (index: number) => boolean;
   onToggle?: (index: number) => void;
+  onEdit?: (index: number) => void;
+  onRemove?: (index: number) => void;
 }) {
   const indexed = charts.map((chart, index) => ({ chart, index }));
   const kpis = indexed.filter((c) => c.chart.spec.chart_type === "kpi");
@@ -20,6 +24,8 @@ export function ChartGrid({
       chart={chart}
       selected={isSelected?.(index)}
       onToggle={onToggle && (() => onToggle(index))}
+      onEdit={onEdit && (() => onEdit(index))}
+      onRemove={onRemove && (() => onRemove(index))}
     />
   );
 

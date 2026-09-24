@@ -131,6 +131,9 @@ basta con definir un `Industry` en `industries.py` y agregar un dataset de ejemp
 - [x] Dashboards guardables y compartibles por enlace (revocable)
 - [x] Aislamiento por organización en todas las consultas
 - [x] Registro e inicio de sesión (correo + contraseña)
+- [x] Editor de gráficos: el usuario ajusta las recomendaciones o crea las suyas, con
+  vista previa en vivo y validación (errores para lo imposible, advertencias para lo
+  engañoso; ver `app/recommender/validation.py`)
 
 ## Autenticación
 

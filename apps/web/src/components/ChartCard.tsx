@@ -51,10 +51,14 @@ export function ChartCard({
   chart,
   selected,
   onToggle,
+  onEdit,
+  onRemove,
 }: {
   chart: RenderedChart;
   selected?: boolean;
   onToggle?: () => void;
+  onEdit?: () => void;
+  onRemove?: () => void;
 }) {
   const { spec, data, error } = chart;
   const wide = spec.chart_type === "table" || spec.chart_type === "line";
@@ -71,12 +75,24 @@ export function ChartCard({
           <h3 className="font-medium">{spec.title}</h3>
           {onToggle && <p className="mt-0.5 text-xs text-muted">{spec.reason}</p>}
         </div>
-        {onToggle && (
-          <label className="flex shrink-0 cursor-pointer items-center gap-1.5 text-xs text-ink-2">
-            <input type="checkbox" checked={selected} onChange={onToggle} />
-            Incluir
-          </label>
-        )}
+        <div className="flex shrink-0 items-center gap-3 text-xs text-ink-2">
+          {onEdit && (
+            <button onClick={onEdit} className="hover:text-accent" aria-label={`Editar ${spec.title}`}>
+              ✏️ Editar
+            </button>
+          )}
+          {onRemove && (
+            <button onClick={onRemove} className="hover:text-danger" aria-label={`Quitar ${spec.title}`}>
+              Quitar
+            </button>
+          )}
+          {onToggle && (
+            <label className="flex cursor-pointer items-center gap-1.5">
+              <input type="checkbox" checked={selected} onChange={onToggle} />
+              Incluir
+            </label>
+          )}
+        </div>
       </header>
       {error || !data ? (
         <p className="text-sm text-danger">{error ?? "Sin datos"}</p>
