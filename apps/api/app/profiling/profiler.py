@@ -1,4 +1,5 @@
-"""Perfilado de datos: infiere el tipo semántico de cada columna y calcula estadísticas.
+"""Perfilado de datos: infiere el tipo semántico de cada columna, calcula estadísticas y
+detecta problemas de calidad que podrían distorsionar los resultados.
 
 El tipo semántico (no el dtype de pandas) es lo que usa el motor de recomendación:
 una columna de texto con fechas es DATETIME, un entero con valores únicos llamado
@@ -11,7 +12,14 @@ import warnings
 import numpy as np
 import pandas as pd
 
-from app.profiling.schemas import ColumnProfile, DatasetProfile, GeoRole, SemanticType
+from app.profiling.schemas import (
+    ColumnProfile,
+    DatasetProfile,
+    DataWarning,
+    GeoRole,
+    SemanticType,
+    WarningLevel,
+)
 from app.text import name_tokens
 
 # Proporción mínima de valores no nulos que deben convertirse para aceptar un tipo.
@@ -20,8 +28,16 @@ MAX_CATEGORIES = 50
 MAX_CATEGORY_RATIO = 0.5
 LONG_TEXT_CHARS = 40
 TOP_VALUES = 10
+HIGH_NULL_RATIO = 0.2
+OUTLIER_IQR_FACTOR = 3.0
+MAX_OUTLIER_RATIO = 0.01  # si hay más, es una distribución de cola larga, no errores
 
 ID_TOKENS = {"id", "uuid", "guid", "folio", "codigo", "code", "key", "clave"}
+# Claves de transacción: agrupan filas de un mismo pedido/ticket (exportaciones con una
+# fila por producto). Solo cuentan si el nombre no dice nada más ("estado_pedido" no es clave).
+ORDER_TOKENS = {"ticket", "pedido", "orden", "order", "folio", "factura", "invoice",
+                "transaccion", "transaction", "recibo", "receipt", "comanda"}
+ORDER_FILLER = {"id", "no", "num", "numero", "nro", "n", "de", "del", "number", "nbr"}
 # Enteros que son etiquetas, no cantidades: sumar números de mesa o años no tiene sentido.
 CODE_TOKENS = {"mesa", "table", "habitacion", "cuarto", "room", "piso", "zona", "nivel",
                "grado", "cp", "zip", "ano", "anio", "year", "mes", "month", "semana", "week"}
@@ -35,7 +51,25 @@ GEO_TOKENS = {
     },
 }
 
+# --- Aditividad: qué métricas se pueden sumar ---
+NON_ADDITIVE_TOKENS = {
+    "tasa", "rate", "porcentaje", "porc", "pct", "percent", "percentage", "ratio",
+    "promedio", "avg", "average", "media", "mean", "rating", "calificacion", "puntuacion",
+    "score", "estrellas", "stars", "edad", "age", "temperatura", "temp", "saldo", "balance",
+}
+ADDITIVE_TOKENS = {
+    "total", "importe", "monto", "venta", "ventas", "ingreso", "ingresos", "cantidad",
+    "unidades", "qty", "quantity", "subtotal", "revenue", "sales", "amount", "costo", "cost",
+    "propina", "tip", "pago", "cobro", "comensales", "personas", "visitas", "piezas",
+}
+# El precio unitario no se suma cuando existe una columna de cantidad (la venta es
+# precio x cantidad). Sin cantidad, cada fila suele ser una venta y sí se suma.
+PRICE_TOKENS = {"precio", "price", "unitario", "unit"}
+QUANTITY_TOKENS = {"cantidad", "qty", "quantity", "unidades", "units", "piezas"}
+LINE_TOTAL_TOKENS = {"total", "subtotal", "importe", "monto", "amount"}
+
 _DATE_LIKE = re.compile(r"\d.*[-/:.]|[a-zA-Z]{3,}.*\d|\d.*[a-zA-Z]{3,}")
+_DAY_MONTH = re.compile(r"^\s*(\d{1,2})[/\-.](\d{1,2})[/\-.]\d{2,4}")
 _CURRENCY_CHARS = re.compile(r"[$€£%\s]|MXN|USD|EUR|COP|ARS|CLP|PEN", re.IGNORECASE)
 _THOUSANDS_COMMA = re.compile(r"^-?\d{1,3}(,\d{3})+(\.\d+)?$")
 _THOUSANDS_DOT = re.compile(r"^-?\d{1,3}(\.\d{3})+(,\d+)?$")
@@ -44,12 +78,29 @@ _THOUSANDS_DOT = re.compile(r"^-?\d{1,3}(\.\d{3})+(,\d+)?$")
 def profile_dataframe(df: pd.DataFrame) -> tuple[DatasetProfile, pd.DataFrame]:
     """Devuelve el perfil y una copia del DataFrame con los tipos ya convertidos."""
     coerced = df.copy()
-    columns = []
+    columns: list[ColumnProfile] = []
+    issues: list[DataWarning] = []
+
     for name in df.columns:
-        semantic_type, series = _infer(df[name], name)
+        semantic_type, series, extra = _infer(df[name], name)
         coerced[name] = series
-        columns.append(_describe(name, df[name], series, semantic_type))
-    return DatasetProfile(n_rows=len(df), n_cols=len(df.columns), columns=columns), coerced
+        column = _describe(name, df[name], series, semantic_type)
+        column.stats.update(extra)
+        columns.append(column)
+        issues += _conversion_issues(column, df[name], series)
+
+    has_quantity = any(
+        c.semantic_type == SemanticType.NUMERIC and set(name_tokens(c.name)) & QUANTITY_TOKENS
+        for c in columns
+    )
+    for column in columns:
+        if column.semantic_type == SemanticType.NUMERIC:
+            column.additive = _is_additive(column, df[column.name], has_quantity)
+            issues += _value_issues(column, coerced[column.name])
+
+    profile = DatasetProfile(n_rows=len(df), n_cols=len(df.columns), columns=columns)
+    profile.warnings = _dataset_issues(df, profile) + issues
+    return profile, coerced
 
 
 def coerce_dataframe(df: pd.DataFrame, profile: DatasetProfile) -> pd.DataFrame:
@@ -61,48 +112,56 @@ def coerce_dataframe(df: pd.DataFrame, profile: DatasetProfile) -> pd.DataFrame:
         if col.semantic_type == SemanticType.NUMERIC:
             coerced[col.name] = _to_numeric(coerced[col.name])
         elif col.semantic_type == SemanticType.DATETIME:
-            coerced[col.name] = _to_datetime(coerced[col.name])
+            coerced[col.name] = _to_datetime(coerced[col.name], col.stats.get("date_order"))
     return coerced
 
 
 # --- Inferencia ---------------------------------------------------------------------------
 
 
-def _infer(series: pd.Series, name: str) -> tuple[SemanticType, pd.Series]:
+def _infer(series: pd.Series, name: str) -> tuple[SemanticType, pd.Series, dict]:
     values = series.dropna()
     tokens = set(name_tokens(name))
 
     if pd.api.types.is_bool_dtype(series):
-        return SemanticType.BOOLEAN, series
+        return SemanticType.BOOLEAN, series, {}
     if pd.api.types.is_datetime64_any_dtype(series):
-        return SemanticType.DATETIME, series
+        return SemanticType.DATETIME, series, {}
     if pd.api.types.is_numeric_dtype(series):
-        return _classify_numeric(series, values, tokens), series
+        return _classify_numeric(values, tokens), series, {}
 
     as_text = values.astype(str).str.strip()
     lowered = as_text.str.lower()
     if not lowered.empty and lowered.isin(BOOLEAN_STRINGS).all() and lowered.nunique() == 2:
-        return SemanticType.BOOLEAN, series
+        return SemanticType.BOOLEAN, series, {}
 
     numeric = _to_numeric(series)
     if _parse_ratio(numeric, values) >= PARSE_THRESHOLD:
-        return _classify_numeric(numeric, numeric.dropna(), tokens), numeric
+        extra = {"percent": True} if as_text.str.endswith("%").mean() >= 0.5 else {}
+        return _classify_numeric(numeric.dropna(), tokens), numeric, extra
 
     if as_text.str.contains(_DATE_LIKE).mean() >= PARSE_THRESHOLD:
-        dates = _to_datetime(series)
+        order = _date_order(as_text)
+        dates = _to_datetime(series, order)
         if _parse_ratio(dates, values) >= PARSE_THRESHOLD:
-            return SemanticType.DATETIME, dates
+            return SemanticType.DATETIME, dates, {"date_order": order} if order else {}
 
-    return _classify_text(as_text, tokens), series
+    return _classify_text(as_text, tokens), series, {}
 
 
-def _classify_numeric(series: pd.Series, values: pd.Series, tokens: set[str]) -> SemanticType:
+def _is_order_key(tokens: set[str]) -> bool:
+    return bool(tokens & ORDER_TOKENS) and tokens <= ORDER_TOKENS | ORDER_FILLER
+
+
+def _classify_numeric(values: pd.Series, tokens: set[str]) -> SemanticType:
     if values.nunique() == 2 and set(values.unique()) == {0, 1}:
         return SemanticType.BOOLEAN
     unique_ratio = values.nunique() / len(values) if len(values) else 0
     if tokens & ID_TOKENS and unique_ratio > 0.9:
         return SemanticType.IDENTIFIER
     is_integer = len(values) and np.all(np.mod(values, 1) == 0)
+    if is_integer and _is_order_key(tokens):
+        return SemanticType.IDENTIFIER
     if is_integer and tokens & CODE_TOKENS and values.nunique() <= MAX_CATEGORIES:
         return SemanticType.CATEGORICAL
     if is_integer and unique_ratio == 1 and len(values) >= 20 and values.is_monotonic_increasing:
@@ -117,13 +176,28 @@ def _classify_text(values: pd.Series, tokens: set[str]) -> SemanticType:
     unique_ratio = n_unique / len(values)
     avg_len = values.str.len().mean()
 
-    if tokens & ID_TOKENS and unique_ratio > 0.9:
+    if _is_order_key(tokens) or (tokens & ID_TOKENS and unique_ratio > 0.9):
         return SemanticType.IDENTIFIER
     if avg_len < LONG_TEXT_CHARS * 1.5 and (
         n_unique <= MAX_CATEGORIES or unique_ratio <= MAX_CATEGORY_RATIO
     ):
         return SemanticType.CATEGORICAL
     return SemanticType.TEXT if avg_len >= LONG_TEXT_CHARS else SemanticType.IDENTIFIER
+
+
+def _is_additive(column: ColumnProfile, original: pd.Series, has_quantity: bool) -> bool:
+    tokens = set(name_tokens(column.name))
+    if column.stats.get("percent") or tokens & NON_ADDITIVE_TOKENS:
+        return False
+    # "precio_venta" es unitario; "precio_total" no.
+    if tokens & PRICE_TOKENS and has_quantity and not tokens & LINE_TOTAL_TOKENS:
+        return False
+    if tokens & ADDITIVE_TOKENS:
+        return True
+    lo, hi = column.stats.get("min"), column.stats.get("max")
+    if lo is not None and 0 <= lo and hi <= 1 and pd.api.types.is_float_dtype(original):
+        return False  # proporciones 0-1
+    return True
 
 
 def _geo_role(name: str, semantic_type: SemanticType) -> GeoRole | None:
@@ -165,16 +239,31 @@ def _normalize_number(text: str) -> str:
     return text
 
 
-def _to_datetime(series: pd.Series) -> pd.Series:
+def _date_order(text: pd.Series) -> str | None:
+    """Decide si las fechas numéricas son día/mes o mes/día mirando los datos:
+    un primer número > 12 solo puede ser día; un segundo > 12, solo día en formato EE.UU.
+    Devuelve 'dmy', 'mdy', 'dmy?' (ambiguo, asumimos latino) o None (sin ese formato)."""
+    parts = text.str.extract(_DAY_MONTH).dropna()
+    if parts.empty:
+        return None
+    first, second = parts[0].astype(int), parts[1].astype(int)
+    if (first > 12).any():
+        return "dmy"
+    if (second > 12).any():
+        return "mdy"
+    return "dmy?"
+
+
+def _to_datetime(series: pd.Series, order: str | None = None) -> pd.Series:
     if pd.api.types.is_datetime64_any_dtype(series):
         return series
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        iso = pd.to_datetime(series, errors="coerce", format="ISO8601")
-        if iso.notna().sum() >= PARSE_THRESHOLD * series.notna().sum():
-            return iso
-        # Formato latino (dd/mm/aaaa) por defecto: la mayoría de usuarios son hispanohablantes.
-        return pd.to_datetime(series, errors="coerce", format="mixed", dayfirst=True)
+        if order is None:
+            iso = pd.to_datetime(series, errors="coerce", format="ISO8601")
+            if iso.notna().sum() >= PARSE_THRESHOLD * series.notna().sum():
+                return iso
+        return pd.to_datetime(series, errors="coerce", format="mixed", dayfirst=order != "mdy")
 
 
 # --- Estadísticas -------------------------------------------------------------------------
@@ -190,7 +279,7 @@ def _describe(
         name=name,
         semantic_type=semantic_type,
         source_dtype=str(original.dtype),
-        null_ratio=round(float(original.isna().mean()), 4) if n else 0.0,
+        null_ratio=round(float(series.isna().mean()), 4) if n else 0.0,
         n_unique=n_unique,
         unique_ratio=round(n_unique / len(values), 4) if len(values) else 0.0,
         geo_role=_geo_role(name, semantic_type),
@@ -226,3 +315,102 @@ def _stats(values: pd.Series, semantic_type: SemanticType) -> dict:
 
 def _num(value) -> float:
     return round(float(value), 4)
+
+
+# --- Calidad de datos ---------------------------------------------------------------------
+
+
+def _fmt(value: float) -> str:
+    return f"{value:,.0f}" if abs(value) >= 100 else f"{value:,.2f}"
+
+
+def _conversion_issues(column: ColumnProfile, original: pd.Series, parsed: pd.Series) -> list:
+    issues = []
+    if column.semantic_type in (SemanticType.NUMERIC, SemanticType.DATETIME) and not (
+        pd.api.types.is_numeric_dtype(original) or pd.api.types.is_datetime64_any_dtype(original)
+    ):
+        text = original.astype("string").str.strip()
+        bad = text.notna() & (text != "") & parsed.isna()
+        if bad.any():
+            n = int(bad.sum())
+            number = column.semantic_type == SemanticType.NUMERIC
+            examples = ", ".join(f"'{v}'" for v in text[bad].unique()[:3])
+            if n == 1:
+                what = f"1 valor de '{column.name}' no es {'un número' if number else 'una fecha'} " \
+                       f"válido ({examples}) y se excluyó de los cálculos."
+            else:
+                what = f"{n} valores de '{column.name}' no son {'números' if number else 'fechas'} " \
+                       f"válidos ({examples}) y se excluyeron de los cálculos."
+            issues.append(DataWarning(
+                level=WarningLevel.WARNING, code="unparsed_values", column=column.name,
+                message=what,
+            ))
+    if column.stats.get("date_order") == "dmy?":
+        issues.append(DataWarning(
+            level=WarningLevel.INFO, code="ambiguous_date_order", column=column.name,
+            message=f"Las fechas de '{column.name}' pueden leerse como día/mes o mes/día; "
+                    "asumimos día/mes (formato latino).",
+        ))
+    if column.null_ratio > HIGH_NULL_RATIO:
+        issues.append(DataWarning(
+            level=WarningLevel.INFO, code="high_nulls", column=column.name,
+            message=f"'{column.name}' está vacía en {column.null_ratio:.0%} de las filas; "
+                    "los cálculos con ella usan solo las filas con dato.",
+        ))
+    return issues
+
+
+def _value_issues(column: ColumnProfile, values: pd.Series) -> list:
+    values = values.dropna()
+    issues = []
+    if len(values) >= 20:
+        q1, q3 = values.quantile([0.25, 0.75])
+        iqr = q3 - q1
+        if iqr > 0:
+            # Solo por arriba: los errores de captura típicos son ceros de más; los valores
+            # bajos o negativos suelen ser devoluciones reales (se avisan aparte).
+            outliers = values[values > q3 + OUTLIER_IQR_FACTOR * iqr]
+            if 0 < len(outliers) <= max(1, MAX_OUTLIER_RATIO * len(values)):
+                extreme = outliers.max()
+                issues.append(DataWarning(
+                    level=WarningLevel.WARNING, code="outliers", column=column.name,
+                    message=f"{len(outliers)} valor(es) de '{column.name}' se salen mucho de lo "
+                            f"normal (hasta {_fmt(extreme)}; la mediana es "
+                            f"{_fmt(values.median())}). Revisa si son errores de captura.",
+                ))
+    if column.additive:
+        negatives = int((values < 0).sum())
+        if 0 < negatives < len(values):
+            issues.append(DataWarning(
+                level=WarningLevel.INFO, code="negative_values", column=column.name,
+                message=f"'{column.name}' tiene {negatives} valores negativos (¿devoluciones o "
+                        "ajustes?); se restan en los totales.",
+            ))
+    return issues
+
+
+def _dataset_issues(df: pd.DataFrame, profile: DatasetProfile) -> list:
+    issues = []
+    summary_rows = df.attrs.get("summary_rows") or []
+    if summary_rows:
+        labels = ", ".join(f"'{v}'" for v in dict.fromkeys(summary_rows))
+        n = len(summary_rows)
+        rows = "1 fila de totales" if n == 1 else f"{n} filas de totales"
+        issues.append(DataWarning(
+            level=WarningLevel.INFO, code="summary_rows_removed",
+            message=f"Se ignoró {rows} ({labels}) para no contar las cifras dos veces."
+            if n == 1 else f"Se ignoraron {rows} ({labels}) para no contar las cifras dos veces.",
+        ))
+    duplicates = int(df.duplicated().sum())
+    if duplicates:
+        has_id = bool(profile.of_type(SemanticType.IDENTIFIER))
+        issues.append(DataWarning(
+            level=WarningLevel.WARNING if has_id else WarningLevel.INFO,
+            code="duplicate_rows",
+            message=f"Hay {duplicates} fila(s) idénticas a otra. "
+                    + ("Como incluyen el mismo identificador, probablemente sean duplicados "
+                       "de la exportación e inflan las cifras."
+                       if has_id else "Si no son ventas o registros reales repetidos, "
+                       "inflarían las cifras."),
+        ))
+    return issues

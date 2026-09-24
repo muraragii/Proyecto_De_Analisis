@@ -47,8 +47,6 @@ function useTheme(): Theme | null {
   return theme;
 }
 
-const AGG_LABEL: Record<string, string> = { sum: "Total", mean: "Promedio", count: "Registros" };
-
 export function ChartCard({
   chart,
   selected,
@@ -83,10 +81,32 @@ export function ChartCard({
       {error || !data ? (
         <p className="text-sm text-danger">{error ?? "Sin datos"}</p>
       ) : (
-        <ChartBody chart={chart} data={data} />
+        <>
+          <ChartBody chart={chart} data={data} />
+          {"notes" in data && data.notes && data.notes.length > 0 && (
+            <ul className="mt-3 space-y-0.5 text-xs text-muted">
+              {data.notes.map((note) => (
+                <li key={note}>{note}</li>
+              ))}
+            </ul>
+          )}
+        </>
       )}
     </section>
   );
+}
+
+/** Qué mide exactamente el eje Y / la cifra, en palabras. */
+function describeMeasure(spec: RenderedChart["spec"]): string {
+  const unit = spec.group_by ? `${spec.group_by}s distintos` : "Registros";
+  if (spec.aggregation === "count" || !spec.y) {
+    return spec.per_day ? `${unit} por día (promedio)` : unit;
+  }
+  if (spec.per_day) return `Promedio diario de ${spec.y}`;
+  if (spec.aggregation === "mean") {
+    return spec.group_by ? `Promedio por ${spec.group_by} de ${spec.y}` : `Promedio de ${spec.y}`;
+  }
+  return `Total de ${spec.y}`;
 }
 
 function ChartBody({ chart, data }: { chart: RenderedChart; data: ChartData }) {
@@ -97,11 +117,7 @@ function ChartBody({ chart, data }: { chart: RenderedChart; data: ChartData }) {
     return (
       <div>
         <p className="text-3xl font-semibold">{formatNumber(data.value)}</p>
-        {spec.y && (
-          <p className="mt-1 text-xs text-muted">
-            {AGG_LABEL[spec.aggregation ?? "sum"]} de {spec.y}
-          </p>
-        )}
+        <p className="mt-1 text-xs text-muted">{describeMeasure(spec)}</p>
       </div>
     );
   }
@@ -109,9 +125,7 @@ function ChartBody({ chart, data }: { chart: RenderedChart; data: ChartData }) {
   if (!theme) return <div className="h-60" />;
   if (data.points.length === 0) return <p className="text-sm text-muted">Sin datos</p>;
 
-  const yLabel = spec.y
-    ? `${AGG_LABEL[spec.aggregation ?? "sum"]} de ${spec.y}`
-    : "Registros";
+  const yLabel = describeMeasure(spec);
   const axis = {
     stroke: theme.axis,
     tick: { fill: theme["text-muted"], fontSize: 12 },
@@ -120,15 +134,29 @@ function ChartBody({ chart, data }: { chart: RenderedChart; data: ChartData }) {
   const tooltip = (
     <Tooltip
       cursor={{ fill: theme.grid, stroke: theme.axis }}
-      contentStyle={{
-        background: theme.surface,
-        border: `1px solid ${theme.grid}`,
-        borderRadius: 8,
-        color: theme["text-primary"],
-        fontSize: 12,
+      content={({ active, payload, label }) => {
+        const point = payload?.[0]?.payload as Point | undefined;
+        if (!active || !point) return null;
+        return (
+          <div
+            style={{
+              background: theme.surface,
+              border: `1px solid ${theme.grid}`,
+              borderRadius: 8,
+              padding: "6px 10px",
+              fontSize: 12,
+            }}
+          >
+            <div style={{ color: theme["text-secondary"] }}>{label ?? point.x}</div>
+            <div style={{ color: theme["text-primary"] }}>
+              {yLabel}: <strong>{formatNumber(point.y)}</strong>
+            </div>
+            {point.partial && (
+              <div style={{ color: theme["text-muted"] }}>Periodo incompleto en los datos</div>
+            )}
+          </div>
+        );
       }}
-      labelStyle={{ color: theme["text-secondary"] }}
-      formatter={(v) => [formatNumber(v), yLabel]}
     />
   );
   const grid = <CartesianGrid stroke={theme.grid} vertical={false} />;
@@ -143,23 +171,62 @@ function ChartBody({ chart, data }: { chart: RenderedChart; data: ChartData }) {
   const points = data.points as Point[];
 
   switch (spec.chart_type) {
-    case "line":
+    case "line": {
+      // Tramo sólido para periodos completos y punteado hacia los incompletos, para que
+      // una semana a medias no se lea como una caída real.
+      const series = points.map((p, i) => ({
+        ...p,
+        full: p.partial ? null : p.y,
+        partialY:
+          p.partial || points[i - 1]?.partial || points[i + 1]?.partial ? p.y : null,
+      }));
+      const hasPartial = points.some((p) => p.partial);
       return frame(
-        <LineChart data={points} margin={{ top: 8, right: 16, left: 0, bottom: 0 }}>
+        <LineChart data={series} margin={{ top: 8, right: 16, left: 0, bottom: 0 }}>
           {grid}
           <XAxis dataKey="x" {...axis} minTickGap={24} />
           {yAxis}
           {tooltip}
           <Line
-            dataKey="y"
-            type="monotone"
+            dataKey="full"
+            type="linear"
             stroke={theme["series-1"]}
             strokeWidth={2}
             dot={false}
             activeDot={{ r: 5, stroke: theme.surface, strokeWidth: 2 }}
+            isAnimationActive={false}
           />
+          {hasPartial && (
+            <Line
+              dataKey="partialY"
+              type="linear"
+              stroke={theme["series-1"]}
+              strokeWidth={2}
+              strokeDasharray="4 4"
+              dot={(props: { cx?: number; cy?: number; index?: number }) => {
+                const p = series[props.index ?? 0];
+                if (!p?.partial || props.cx == null || props.cy == null) {
+                  return <g key={props.index} />;
+                }
+                return (
+                  <circle
+                    key={props.index}
+                    cx={props.cx}
+                    cy={props.cy}
+                    r={4}
+                    fill={theme.surface}
+                    stroke={theme["series-1"]}
+                    strokeWidth={2}
+                  />
+                );
+              }}
+              activeDot={false}
+              isAnimationActive={false}
+            />
+          )}
         </LineChart>,
       );
+    }
     case "bar":
       return frame(
         <BarChart data={points} margin={{ top: 8, right: 8, left: 0, bottom: 0 }} barCategoryGap={2}>

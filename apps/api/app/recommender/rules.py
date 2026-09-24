@@ -51,6 +51,15 @@ def time_granularity(column: ColumnProfile) -> XTransform:
 GRANULARITY_LABEL = {XTransform.DAY: "día", XTransform.WEEK: "semana", XTransform.MONTH: "mes"}
 
 
+def measure_agg(m: ColumnProfile) -> Aggregation:
+    """Las métricas no aditivas (precio unitario, %, calificaciones) se promedian."""
+    return Aggregation.MEAN if m.additive is False else Aggregation.SUM
+
+
+def measure_label(m: ColumnProfile) -> str:
+    return m.name if m.additive is not False else f"promedio de {m.name}"
+
+
 def generic_rules(profile: DatasetProfile) -> list[ChartSpec]:
     ms = measures(profile)[:MAX_MEASURES]
     ds = dimensions(profile)[:MAX_DIMENSIONS]
@@ -68,14 +77,17 @@ def generic_rules(profile: DatasetProfile) -> list[ChartSpec]:
         )
     )
     for i, m in enumerate(ms):
+        additive = m.additive is not False
         specs.append(
             ChartSpec(
                 chart_type=ChartType.KPI,
-                title=f"Total {m.name}",
+                title=f"Total {m.name}" if additive else f"Promedio de {m.name}",
                 y=m.name,
-                aggregation=Aggregation.SUM,
+                aggregation=measure_agg(m),
                 score=0.7 - DECAY * i,
-                reason=f"'{m.name}' es una métrica numérica: su total resume el negocio.",
+                reason=f"'{m.name}' es una métrica numérica: su total resume el negocio."
+                if additive
+                else f"'{m.name}' no se puede sumar (precio, %, calificación…): se promedia.",
             )
         )
 
@@ -98,10 +110,10 @@ def generic_rules(profile: DatasetProfile) -> list[ChartSpec]:
             specs.append(
                 ChartSpec(
                     chart_type=ChartType.LINE,
-                    title=f"{m.name} por {label}",
+                    title=f"{measure_label(m)} por {label}",
                     x=t.name,
                     y=m.name,
-                    aggregation=Aggregation.SUM,
+                    aggregation=measure_agg(m),
                     x_transform=gran,
                     score=0.9 - DECAY * (i + j),
                     reason=f"Fecha + métrica: tendencia de '{m.name}' en el tiempo.",
@@ -125,10 +137,10 @@ def generic_rules(profile: DatasetProfile) -> list[ChartSpec]:
             specs.append(
                 ChartSpec(
                     chart_type=ChartType.BAR,
-                    title=f"{m.name} por {d.name}",
+                    title=f"{measure_label(m)} por {d.name}",
                     x=d.name,
                     y=m.name,
-                    aggregation=Aggregation.SUM,
+                    aggregation=measure_agg(m),
                     limit=BAR_LIMIT,
                     score=0.8 - DECAY * (i + j),
                     reason=f"Categoría + métrica: compara '{m.name}' entre valores de '{d.name}'.",
@@ -146,8 +158,8 @@ def generic_rules(profile: DatasetProfile) -> list[ChartSpec]:
                 )
             )
             for j, m in enumerate(ms):
-                if m.stats.get("min", 0) < 0:
-                    continue  # un pastel con valores negativos no tiene sentido
+                if m.stats.get("min", 0) < 0 or m.additive is False:
+                    continue  # un pastel solo muestra partes de un total positivo
                 specs.append(
                     ChartSpec(
                         chart_type=ChartType.PIE,

@@ -38,6 +38,13 @@ class ChartSpec(BaseModel):
     y: str | None = None
     aggregation: Aggregation | None = None
     x_transform: XTransform | None = None
+    # Unidad de análisis: columna que agrupa filas de una misma transacción (p. ej. el
+    # ticket cuando hay una fila por platillo). Con ella, SUM/MEAN se calculan sobre el
+    # total de cada transacción y COUNT cuenta transacciones distintas, no filas.
+    group_by: str | None = None
+    # Solo con x_transform HOUR/WEEKDAY: promedio por día del calendario en lugar de total,
+    # para no favorecer a los días de la semana que aparecen más veces en el rango.
+    per_day: bool = False
     limit: int | None = None
     score: float = 0.0
     reason: str = ""
@@ -45,4 +52,5 @@ class ChartSpec(BaseModel):
 
     def key(self) -> tuple:
         """Identidad del gráfico para deduplicar sugerencias equivalentes."""
-        return (self.chart_type, self.x, self.y, self.aggregation, self.x_transform)
+        return (self.chart_type, self.x, self.y, self.aggregation, self.x_transform,
+                self.group_by, self.per_day)

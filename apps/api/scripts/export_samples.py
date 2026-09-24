@@ -17,4 +17,5 @@ if __name__ == "__main__":
     samples.ecommerce().to_csv(OUT / "ecommerce_pedidos.csv", index=False)
     samples.restaurante().to_csv(OUT / "restaurante_tickets.csv", index=False, sep=";")
     samples.clinica().to_excel(OUT / "clinica_citas.xlsx", index=False)
+    samples.restaurante_pos().to_excel(OUT / "restaurante_punto_de_venta.xlsx", index=False)
     print(f"Ejemplos generados en {OUT}")

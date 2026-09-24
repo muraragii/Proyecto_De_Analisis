@@ -6,6 +6,7 @@ import { ChartGrid } from "@/components/ChartGrid";
 import {
   api,
   formatNumber,
+  type DataWarning,
   type Dataset,
   type Industry,
   type Recommendations,
@@ -20,6 +21,34 @@ const TYPE_LABEL: Record<SemanticType, string> = {
   identifier: "Identificador",
   text: "Texto libre",
 };
+
+/** Avisos que afectan la interpretación de las cifras. Nunca solo color: icono + etiqueta. */
+function DataQuality({ warnings }: { warnings: DataWarning[] }) {
+  const sorted = [...warnings].sort((a, b) =>
+    a.level === b.level ? 0 : a.level === "warning" ? -1 : 1,
+  );
+  return (
+    <section className="rounded-xl border border-line bg-surface p-4">
+      <h2 className="font-medium">Calidad de los datos</h2>
+      <ul className="mt-2 space-y-2 text-sm">
+        {sorted.map((w) => (
+          <li key={`${w.code}-${w.column ?? ""}`} className="flex gap-2">
+            <span
+              aria-hidden
+              className={`shrink-0 font-semibold ${w.level === "warning" ? "text-danger" : "text-accent"}`}
+            >
+              {w.level === "warning" ? "⚠" : "ⓘ"}
+            </span>
+            <span>
+              <span className="sr-only">{w.level === "warning" ? "Advertencia:" : "Nota:"}</span>{" "}
+              {w.message}
+            </span>
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
 
 export default function DatasetPage() {
   const { id } = useParams<{ id: string }>();
@@ -90,6 +119,10 @@ export default function DatasetPage() {
         </p>
       </section>
 
+      {dataset.profile && dataset.profile.warnings.length > 0 && (
+        <DataQuality warnings={dataset.profile.warnings} />
+      )}
+
       <details className="rounded-xl border border-line bg-surface">
         <summary className="cursor-pointer px-4 py-3 font-medium">Perfil de columnas</summary>
         <div className="overflow-x-auto">
@@ -100,6 +133,7 @@ export default function DatasetPage() {
                 <th className="px-4 py-2 font-medium">Tipo detectado</th>
                 <th className="px-4 py-2 font-medium tabular-nums">Valores únicos</th>
                 <th className="px-4 py-2 font-medium tabular-nums">Nulos</th>
+                <th className="px-4 py-2 font-medium">Cómo se resume</th>
               </tr>
             </thead>
             <tbody>
@@ -109,6 +143,10 @@ export default function DatasetPage() {
                   <td className="px-4 py-2">{TYPE_LABEL[c.semantic_type]}</td>
                   <td className="px-4 py-2 tabular-nums">{formatNumber(c.n_unique)}</td>
                   <td className="px-4 py-2 tabular-nums">{Math.round(c.null_ratio * 100)}%</td>
+                  <td className="px-4 py-2 text-ink-2">
+                    {c.additive === true && "Se suma"}
+                    {c.additive === false && "Se promedia (no tiene sentido sumarla)"}
+                  </td>
                 </tr>
               ))}
             </tbody>

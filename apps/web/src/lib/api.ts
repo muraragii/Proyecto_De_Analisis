@@ -18,7 +18,15 @@ export interface ColumnProfile {
   n_unique: number;
   unique_ratio: number;
   geo_role: "lat" | "lon" | "region" | null;
+  additive: boolean | null;
   stats: Record<string, unknown>;
+}
+
+export interface DataWarning {
+  level: "info" | "warning";
+  code: string;
+  message: string;
+  column: string | null;
 }
 
 export interface Dataset {
@@ -29,7 +37,12 @@ export interface Dataset {
   n_cols: number;
   detected_industry: string | null;
   created_at: string;
-  profile: { n_rows: number; n_cols: number; columns: ColumnProfile[] } | null;
+  profile: {
+    n_rows: number;
+    n_cols: number;
+    columns: ColumnProfile[];
+    warnings: DataWarning[];
+  } | null;
 }
 
 export interface ChartSpec {
@@ -39,17 +52,21 @@ export interface ChartSpec {
   y: string | null;
   aggregation: "sum" | "mean" | "count" | null;
   x_transform: string | null;
+  group_by: string | null;
+  per_day: boolean;
   limit: number | null;
   score: number;
   reason: string;
   source: string;
 }
 
-export type Point = { x: string | number | null; y: number | null };
+/** partial: el periodo no está completo en los datos (primera/última semana o mes). */
+export type Point = { x: string | number | null; y: number | null; partial?: boolean };
 
+/** notes: aclaraciones para interpretar bien la cifra (top N, promedios diarios, huecos…). */
 export type ChartData =
-  | { value: number | null }
-  | { points: Point[] }
+  | { value: number | null; notes?: string[] }
+  | { points: Point[]; notes?: string[] }
   | { columns: string[]; rows: unknown[][]; total_rows: number };
 
 export interface RenderedChart {

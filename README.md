@@ -67,6 +67,21 @@ cd apps\web; npm run lint; npm run build
 4. **Selección** (`recommender/engine.py`): se combinan, se deduplican y se
    priorizan por score (máx. 12 gráficos).
 
+### Reglas de corrección analítica
+
+Verificadas con tests de referencia (`tests/test_golden.py`, respuestas calculadas a mano):
+
+| Regla | Evita |
+|---|---|
+| Filas "TOTAL" / "Gran total" se eliminan al cargar | Duplicar las ventas |
+| Métricas no aditivas (precio unitario con cantidad, %, tasas, calificaciones) se promedian | "Total de precio unitario" |
+| Clave de transacción (ticket, pedido, folio) como unidad de análisis | Ticket promedio por línea en vez de por cuenta |
+| Día de la semana / hora como promedio por día del calendario | Que el lunes "gane" por aparecer 13 veces vs. 12 |
+| Series de tiempo completas (periodos sin datos = 0) | Que un día sin ventas desaparezca |
+| Primer/último periodo incompleto marcado (línea punteada) | Leer una semana a medias como caída |
+| Orden día/mes deducido de los datos (25/04 ⇒ día/mes) | Confundir 3 de abril con 4 de marzo |
+| Avisos: valores ilegibles, duplicados, atípicos, negativos, vacíos | Errores silenciosos |
+
 Industrias incluidas: **e-commerce**, **restaurante** y **clínica**. Para añadir otra,
 basta con definir un `Industry` en `industries.py` y agregar un dataset de ejemplo en
 `app/samples.py` con su test.
@@ -102,6 +117,4 @@ basta con definir un `Industry` en `industries.py` y agregar un dataset de ejemp
 - **Postgres** en lugar de SQLite (solo cambia `APP_DATABASE_URL`) y **S3** para
   archivos (implementar `Storage` en `ingestion/storage.py`).
 - **Caché de DataFrames**: hoy se relee el archivo en cada petición.
-- **Periodos parciales**: la primera y última semana/mes pueden verse como caídas
-  falsas si el rango de datos no empieza o termina en un límite de periodo.
 - Encriptación de archivos en reposo.

@@ -43,6 +43,39 @@ def restaurante(n: int = 800, seed: int = 1) -> pd.DataFrame:
     })
 
 
+def restaurante_pos(n_tickets: int = 400, seed: int = 3) -> pd.DataFrame:
+    """Exportación "real" de un punto de venta: una fila por platillo (varias por ticket),
+    precio unitario + cantidad, fechas dd/mm/aaaa como texto, un valor mal capturado y la
+    fila TOTAL que agregan los Excel. Sirve para ver las advertencias de calidad."""
+    rng = np.random.default_rng(seed)
+    menu = {"Tacos al pastor": 25, "Quesadilla": 45, "Pozole": 120, "Enchiladas": 110,
+            "Agua de horchata": 35, "Refresco": 30, "Cerveza": 55, "Flan": 50}
+    start = pd.Timestamp("2025-04-02")  # miércoles: la primera semana queda incompleta
+    rows = []
+    for t in range(1, n_tickets + 1):
+        day = start + pd.Timedelta(days=int(rng.integers(0, 60)))
+        hour = int(rng.choice([13, 14, 15, 19, 20, 21], p=[0.15, 0.25, 0.15, 0.1, 0.2, 0.15]))
+        when = day + pd.Timedelta(hours=hour, minutes=int(rng.integers(0, 60)))
+        mesero = rng.choice(["Ana", "Luis", "Carla", "Jorge"])
+        for item in rng.choice(list(menu), int(rng.integers(1, 5)), replace=False):
+            qty = int(rng.integers(1, 4))
+            rows.append({
+                "No. Ticket": t,
+                "Fecha": when.strftime("%d/%m/%Y %H:%M"),
+                "Mesero": mesero,
+                "Platillo": item,
+                "Cantidad": qty,
+                "Precio unitario": menu[item],
+                "Importe": f"${menu[item] * qty:,.2f}",
+            })
+    df = pd.DataFrame(rows)
+    df.loc[7, "Importe"] = "pendiente"
+    total = pd.to_numeric(df["Importe"].str.replace(r"[$,]", "", regex=True), errors="coerce").sum()
+    df.loc[len(df)] = {"No. Ticket": None, "Fecha": None, "Mesero": None, "Platillo": "TOTAL",
+                       "Cantidad": None, "Precio unitario": None, "Importe": f"${total:,.2f}"}
+    return df
+
+
 def clinica(n: int = 600, seed: int = 2) -> pd.DataFrame:
     rng = np.random.default_rng(seed)
     especialidades = {"Dra. López": "Pediatría", "Dr. Pérez": "Cardiología",

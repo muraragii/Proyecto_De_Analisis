@@ -29,6 +29,7 @@ class Role:
     types: frozenset[SemanticType]
     requires_time: bool = False  # solo fechas con componente horario
     shared: bool = False  # puede reutilizar una columna ya asignada a otro rol
+    additive_only: bool = False  # descarta métricas no sumables (precio unitario, %)
 
 
 @dataclass(frozen=True)
@@ -42,6 +43,10 @@ class Template:
     y: str | None = None  # id de rol
     x_transform: XTransform | str | None = None
     limit: int | None = None
+    # Calcular por transacción (rol "order") si el dataset trae una fila por producto.
+    per_order: bool = False
+    per_day: bool = False  # promedio por día del calendario (ver ChartSpec.per_day)
+    unless: str | None = None  # omitir si este rol existe (hay una plantilla mejor)
 
 
 @dataclass(frozen=True)
@@ -59,6 +64,9 @@ def _role(id, keywords, types, **kw) -> Role:
 
 _REVENUE = ["venta", "ventas", "revenue", "ingreso", "total", "importe", "monto", "amount",
             "sales", "subtotal", "facturacion", "pago", "cobro"]
+IDENT = {SemanticType.IDENTIFIER}
+_ORDER = ["ticket", "pedido", "orden", "order", "folio", "factura", "invoice", "transaccion",
+          "recibo", "comanda"]
 
 ECOMMERCE = Industry(
     id="ecommerce",
@@ -66,8 +74,10 @@ ECOMMERCE = Industry(
     description="Tiendas en línea: ventas, productos, canales y clientes.",
     roles=(
         _role("date", ["fecha", "date", "created", "timestamp", "dia"], DATE),
-        _role("revenue", _REVENUE, NUM),
-        _role("quantity", ["cantidad", "qty", "quantity", "unidades", "units", "piezas"], NUM),
+        _role("order", _ORDER, IDENT),
+        _role("revenue", _REVENUE, NUM, additive_only=True),
+        _role("quantity", ["cantidad", "qty", "quantity", "unidades", "units", "piezas"], NUM,
+              additive_only=True),
         _role("category", ["categoria", "category", "departamento", "familia", "linea"], CAT),
         _role("product", ["producto", "product", "articulo", "item", "sku"], CAT),
         _role("channel", ["canal", "channel", "origen", "source", "medio", "marketplace",
@@ -85,9 +95,9 @@ ECOMMERCE = Industry(
         Template("Ventas totales", ChartType.KPI, Aggregation.SUM, 0.95,
                  "Ingreso total del periodo.", y="revenue"),
         Template("Ticket promedio", ChartType.KPI, Aggregation.MEAN, 0.93,
-                 "Valor medio de cada venta.", y="revenue"),
+                 "Valor medio de cada pedido.", y="revenue", per_order=True),
         Template("Pedidos", ChartType.KPI, Aggregation.COUNT, 0.9,
-                 "Número de pedidos (filas) en el periodo."),
+                 "Número de pedidos en el periodo.", per_order=True),
         Template("Ventas por categoría", ChartType.BAR, Aggregation.SUM, 0.9,
                  "Qué líneas de producto sostienen el negocio.",
                  x="category", y="revenue", limit=15),
@@ -102,7 +112,8 @@ ECOMMERCE = Industry(
         Template("Mejores clientes", ChartType.BAR, Aggregation.SUM, 0.75,
                  "Clientes que más compran.", x="customer", y="revenue", limit=10),
         Template("Pedidos por estado", ChartType.BAR, Aggregation.COUNT, 0.7,
-                 "Seguimiento operativo: pagados, enviados, cancelados...", x="status"),
+                 "Seguimiento operativo: pagados, enviados, cancelados...", x="status",
+                 per_order=True),
     ),
 )
 
@@ -114,8 +125,12 @@ RESTAURANTE = Industry(
         _role("date", ["fecha", "date", "dia", "timestamp", "apertura"], DATE),
         _role("time", ["hora", "horario", "time", "fecha", "date", "timestamp"], DATE,
               requires_time=True, shared=True),
-        _role("revenue", _REVENUE + ["ticket", "cuenta", "consumo"], NUM),
-        _role("covers", ["comensales", "personas", "pax", "cubiertos", "guests", "covers"], NUM),
+        _role("order", _ORDER + ["cuenta"], IDENT),
+        _role("revenue", _REVENUE + ["ticket", "cuenta", "consumo"], NUM, additive_only=True),
+        _role("quantity", ["cantidad", "qty", "quantity", "unidades", "porciones"], NUM,
+              additive_only=True),
+        _role("covers", ["comensales", "personas", "pax", "cubiertos", "guests", "covers"], NUM,
+              additive_only=True),
         _role("category", ["categoria", "category", "seccion", "tipo"], CAT),
         _role("dish", ["platillo", "plato", "producto", "item", "articulo", "bebida", "menu"], CAT),
         _role("waiter", ["mesero", "mesera", "camarero", "camarera", "empleado", "waiter",
@@ -124,19 +139,23 @@ RESTAURANTE = Industry(
     ),
     templates=(
         Template("Ticket promedio", ChartType.KPI, Aggregation.MEAN, 0.97,
-                 "El indicador clave de un restaurante: gasto medio por cuenta.", y="revenue"),
+                 "El indicador clave de un restaurante: gasto medio por cuenta.", y="revenue",
+                 per_order=True),
         Template("Horarios pico", ChartType.BAR, Aggregation.COUNT, 0.96,
-                 "Volumen por hora del día para planear personal y cocina.",
-                 x="time", x_transform=XTransform.HOUR),
+                 "Tickets promedio por día en cada hora, para planear personal y cocina.",
+                 x="time", x_transform=XTransform.HOUR, per_order=True, per_day=True),
         Template("Ventas totales", ChartType.KPI, Aggregation.SUM, 0.95,
                  "Ingreso total del periodo.", y="revenue"),
-        Template("Ventas por día de la semana", ChartType.BAR, Aggregation.SUM, 0.92,
-                 "Qué días concentran la demanda.",
-                 x="date", y="revenue", x_transform=XTransform.WEEKDAY),
+        Template("Venta promedio por día de la semana", ChartType.BAR, Aggregation.SUM, 0.92,
+                 "Qué días concentran la demanda (promedio por día, no total, para no "
+                 "favorecer a los días que aparecen más veces en el periodo).",
+                 x="date", y="revenue", x_transform=XTransform.WEEKDAY, per_day=True),
         Template("Ventas en el tiempo", ChartType.LINE, Aggregation.SUM, 0.9,
                  "Evolución de ventas.", x="date", y="revenue", x_transform=AUTO),
+        Template("Platillos más vendidos", ChartType.BAR, Aggregation.SUM, 0.91,
+                 "Los platillos con más unidades vendidas.", x="dish", y="quantity", limit=10),
         Template("Platillos más vendidos", ChartType.BAR, Aggregation.COUNT, 0.9,
-                 "Los platillos con más pedidos.", x="dish", limit=10),
+                 "Los platillos con más pedidos.", x="dish", limit=10, unless="quantity"),
         Template("Comensales atendidos", ChartType.KPI, Aggregation.SUM, 0.85,
                  "Total de personas atendidas (ocupación).", y="covers"),
         Template("Platillos con más ingresos", ChartType.BAR, Aggregation.SUM, 0.85,
@@ -144,7 +163,7 @@ RESTAURANTE = Industry(
         Template("Ventas por sucursal", ChartType.BAR, Aggregation.SUM, 0.82,
                  "Comparativa entre locales.", x="branch", y="revenue"),
         Template("Tickets", ChartType.KPI, Aggregation.COUNT, 0.8,
-                 "Número de cuentas/tickets registrados."),
+                 "Número de cuentas/tickets registrados.", per_order=True),
         Template("Ventas por mesero", ChartType.BAR, Aggregation.SUM, 0.8,
                  "Desempeño del personal de servicio.", x="waiter", y="revenue"),
         Template("Ventas por categoría", ChartType.PIE, Aggregation.SUM, 0.75,
@@ -160,7 +179,8 @@ CLINICA = Industry(
         _role("date", ["fecha", "cita", "date", "appointment", "consulta", "dia"], DATE),
         _role("time", ["hora", "horario", "time", "fecha", "cita", "date"], DATE,
               requires_time=True, shared=True),
-        _role("revenue", _REVENUE + ["costo", "precio", "honorarios", "tarifa"], NUM),
+        _role("revenue", _REVENUE + ["costo", "precio", "honorarios", "tarifa"], NUM,
+              additive_only=True),
         _role("specialty", ["especialidad", "specialty", "servicio", "area", "departamento"], CAT),
         _role("doctor", ["medico", "doctor", "doctora", "especialista", "profesional", "dr"], CAT),
         _role("status", ["estado", "estatus", "status", "asistencia", "asistio"],
@@ -184,10 +204,11 @@ CLINICA = Industry(
         Template("Ingreso promedio por cita", ChartType.KPI, Aggregation.MEAN, 0.85,
                  "Valor medio de cada consulta.", y="revenue"),
         Template("Horarios de mayor demanda", ChartType.BAR, Aggregation.COUNT, 0.85,
-                 "Horas con más citas agendadas.", x="time", x_transform=XTransform.HOUR),
-        Template("Citas por día de la semana", ChartType.BAR, Aggregation.COUNT, 0.8,
-                 "Qué días hay más carga en la agenda.", x="date",
-                 x_transform=XTransform.WEEKDAY),
+                 "Citas promedio por día en cada hora.", x="time",
+                 x_transform=XTransform.HOUR, per_day=True),
+        Template("Citas promedio por día de la semana", ChartType.BAR, Aggregation.COUNT, 0.8,
+                 "Qué días hay más carga en la agenda (promedio por día).", x="date",
+                 x_transform=XTransform.WEEKDAY, per_day=True),
         Template("Pacientes por aseguradora", ChartType.PIE, Aggregation.COUNT, 0.75,
                  "Mezcla de pagadores.", x="insurance"),
     ),
@@ -223,6 +244,8 @@ def resolve_roles(profile: DatasetProfile, industry: Industry) -> dict[str, str]
                 continue
             if role.requires_time and not col.stats.get("has_time"):
                 continue
+            if role.additive_only and col.additive is False:
+                continue
             rank = _match_rank(col, role.keywords)
             if rank is not None:
                 candidates.append((rank, col.name))
@@ -240,6 +263,8 @@ def industry_specs(profile: DatasetProfile, industry: Industry) -> list[ChartSpe
     for t in industry.templates:
         if (t.x and t.x not in roles) or (t.y and t.y not in roles):
             continue
+        if t.unless and t.unless in roles:
+            continue
         x = roles.get(t.x) if t.x else None
         transform = t.x_transform
         if transform == AUTO:
@@ -252,6 +277,8 @@ def industry_specs(profile: DatasetProfile, industry: Industry) -> list[ChartSpe
                 y=roles.get(t.y) if t.y else None,
                 aggregation=t.aggregation,
                 x_transform=transform,
+                group_by=roles.get("order") if t.per_order else None,
+                per_day=t.per_day,
                 limit=t.limit,
                 score=t.score,
                 reason=t.reason,
@@ -267,7 +294,7 @@ def detect_industry(profile: DatasetProfile) -> tuple[str | None, float]:
     best_id, best_score = None, 0.0
     for industry in INDUSTRIES.values():
         roles = resolve_roles(profile, industry)
-        role_templates = [t for t in industry.templates if t.x or t.y]
+        role_templates = [t for t in industry.templates if (t.x or t.y) and not t.unless]
         usable = [
             t for t in role_templates
             if (not t.x or t.x in roles) and (not t.y or t.y in roles)
